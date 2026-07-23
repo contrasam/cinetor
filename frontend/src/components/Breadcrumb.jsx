@@ -23,7 +23,12 @@ export default function Breadcrumb({ city, movie, show, step, onHome, onCity, on
       {movie && sep}
       {movie && crumb(movie.title, step === 'shows', step === 'shows' ? null : onMovie)}
       {show && sep}
-      {show && crumb(`${show.startTime} · ${show.format}`, step === 'seats' || step === 'confirm', null)}
+      {show &&
+        crumb(
+          `${show.startTime} · ${show.format}`,
+          step === 'seats' || step === 'payment' || step === 'confirm',
+          null,
+        )}
     </nav>
   );
 }

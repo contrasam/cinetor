@@ -33,10 +33,11 @@ public final class CinetorApp {
 
     public static void main(String[] args) {
         int port = resolvePort();
+        long holdMillis = resolveHoldMillis();
 
         ActorSystem system = new ActorSystem();
         CatalogueData catalogue = new CatalogueData();
-        BookingService bookings = new BookingService(system, catalogue);
+        BookingService bookings = new BookingService(system, catalogue, holdMillis);
         SeatStreamHub seatStream = new SeatStreamHub();
 
         Javalin app = Javalin.create(config -> {
@@ -47,6 +48,10 @@ public final class CinetorApp {
         // --- Catalogue browsing -------------------------------------------------
 
         app.get("/api/health", ctx -> ctx.json(Map.of("status", "ok")));
+
+        // Lets the UI show the correct countdown length for held seats.
+        app.get("/api/config", ctx ->
+                ctx.json(Map.of("holdSeconds", (int) (holdMillis / 1000))));
 
         app.get("/api/cities", ctx -> ctx.json(catalogue.cities()));
 
@@ -76,31 +81,73 @@ public final class CinetorApp {
                     booked));
         });
 
-        // --- Booking ------------------------------------------------------------
+        // --- Hold seats (phase 1) ----------------------------------------------
+        // Reserves seats during "payment". A hold blocks other users but is NOT
+        // broadcast over SSE — the public seat map does not change on a hold.
 
-        app.post("/api/shows/{showId}/book", ctx -> {
-            Show show = catalogue.show(ctx.pathParam("showId")).orElse(null);
+        app.post("/api/shows/{showId}/hold", ctx -> {
+            Show show = requireShow(catalogue, ctx);
             if (show == null) {
-                ctx.status(HttpStatus.NOT_FOUND).json(Map.of("error", "Unknown show"));
                 return;
             }
-            Dtos.BookingRequest req = ctx.bodyAsClass(Dtos.BookingRequest.class);
+            Dtos.HoldRequest req = ctx.bodyAsClass(Dtos.HoldRequest.class);
+            Object result = bookings.hold(show, req.seatIds(), req.holderId());
+
+            switch (result) {
+                case ShowProtocol.Held held -> {
+                    int ttl = (int) Math.max(0,
+                            (held.expiresAtEpochMs() - System.currentTimeMillis()) / 1000);
+                    ctx.json(Dtos.HoldResponse.held(
+                            held.holdId(), held.seatIds(), held.expiresAtEpochMs(), ttl,
+                            totalPrice(show, held.seatIds())));
+                }
+                case ShowProtocol.Rejected no -> ctx.status(HttpStatus.CONFLICT)
+                        .json(Dtos.HoldResponse.rejected(no.reason(), no.conflictingSeats()));
+                default -> ctx.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .json(Map.of("error", "Unexpected hold result"));
+            }
+        });
+
+        // --- Confirm booking (phase 2) -----------------------------------------
+        // Turns a hold into a booking. THIS is the only step that changes the
+        // public seat map, so it is the only step that broadcasts over SSE.
+
+        app.post("/api/shows/{showId}/confirm", ctx -> {
+            Show show = requireShow(catalogue, ctx);
+            if (show == null) {
+                return;
+            }
+            Dtos.ConfirmRequest req = ctx.bodyAsClass(Dtos.ConfirmRequest.class);
             String customer = req.customerName() == null || req.customerName().isBlank()
                     ? "Guest" : req.customerName().trim();
 
-            ShowProtocol.BookResult result = bookings.book(show, req.seatIds(), customer);
+            Object result = bookings.confirm(show, req.holdId(), req.holderId(), customer);
 
             switch (result) {
                 case ShowProtocol.Confirmed ok -> {
-                    // Push the new seat state to everyone watching this show.
+                    // Booking done — push the new seat state to everyone watching.
                     seatStream.broadcast(show.id(), ok.allBookedSeats());
-                    int total = totalPrice(show, ok.seatIds());
                     ctx.json(Dtos.BookingResponse.confirmed(
-                            ok.bookingId(), customer, ok.seatIds(), total, ok.allBookedSeats()));
+                            ok.bookingId(), customer, ok.seatIds(),
+                            totalPrice(show, ok.seatIds()), ok.allBookedSeats()));
                 }
                 case ShowProtocol.Rejected no -> ctx.status(HttpStatus.CONFLICT)
                         .json(Dtos.BookingResponse.rejected(no.reason(), no.conflictingSeats()));
+                default -> ctx.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .json(Map.of("error", "Unexpected confirm result"));
             }
+        });
+
+        // --- Release a hold (user cancelled) -----------------------------------
+
+        app.post("/api/shows/{showId}/release", ctx -> {
+            Show show = requireShow(catalogue, ctx);
+            if (show == null) {
+                return;
+            }
+            Dtos.ReleaseRequest req = ctx.bodyAsClass(Dtos.ReleaseRequest.class);
+            boolean released = bookings.release(show, req.holdId(), req.holderId());
+            ctx.json(Map.of("released", released));
         });
 
         // --- Realtime seat updates (SSE) ---------------------------------------
@@ -129,6 +176,15 @@ public final class CinetorApp {
         log.info("Cinetor backend listening on http://localhost:{}", port);
     }
 
+    /** Resolves the show from the path, writing a 404 and returning null if unknown. */
+    private static Show requireShow(CatalogueData catalogue, io.javalin.http.Context ctx) {
+        Show show = catalogue.show(ctx.pathParam("showId")).orElse(null);
+        if (show == null) {
+            ctx.status(HttpStatus.NOT_FOUND).json(Map.of("error", "Unknown show"));
+        }
+        return show;
+    }
+
     private static int totalPrice(Show show, List<String> seatIds) {
         Map<String, Seat> byId = Seats.layout(show.rows(), show.cols()).stream()
                 .collect(java.util.stream.Collectors.toMap(Seat::id, s -> s));
@@ -145,6 +201,20 @@ public final class CinetorApp {
             return prop == null ? 7070 : Integer.parseInt(prop);
         } catch (NumberFormatException e) {
             return 7070;
+        }
+    }
+
+    /** Hold window in ms. Defaults to 5 minutes; override with -Dcinetor.holdSeconds=N. */
+    private static long resolveHoldMillis() {
+        String prop = System.getProperty("cinetor.holdSeconds");
+        if (prop == null) {
+            prop = System.getenv("HOLD_SECONDS");
+        }
+        try {
+            long seconds = prop == null ? 300 : Long.parseLong(prop);
+            return Math.max(1, seconds) * 1000L;
+        } catch (NumberFormatException e) {
+            return 300_000L;
         }
     }
 }

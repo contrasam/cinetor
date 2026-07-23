@@ -24,11 +24,40 @@ public final class Dtos {
             List<String> bookedSeats) {
     }
 
-    /** Body of POST /api/shows/{id}/book. */
-    public record BookingRequest(List<String> seatIds, String customerName) {
+    // --- Hold (phase 1) ----------------------------------------------------
+
+    /** Body of POST /api/shows/{id}/hold. */
+    public record HoldRequest(List<String> seatIds, String holderId) {
     }
 
-    /** Response for a booking attempt. */
+    /** Response for a hold attempt. */
+    public record HoldResponse(
+            String status,
+            String holdId,
+            List<String> seats,
+            long expiresAt,
+            int ttlSeconds,
+            int totalPrice,
+            String reason,
+            List<String> conflictingSeats) {
+
+        public static HoldResponse held(String holdId, List<String> seats, long expiresAt,
+                                        int ttlSeconds, int totalPrice) {
+            return new HoldResponse("HELD", holdId, seats, expiresAt, ttlSeconds, totalPrice, null, null);
+        }
+
+        public static HoldResponse rejected(String reason, List<String> conflicts) {
+            return new HoldResponse("REJECTED", null, null, 0, 0, 0, reason, conflicts);
+        }
+    }
+
+    // --- Confirm (phase 2) -------------------------------------------------
+
+    /** Body of POST /api/shows/{id}/confirm. */
+    public record ConfirmRequest(String holdId, String holderId, String customerName) {
+    }
+
+    /** Response for a booking confirmation. */
     public record BookingResponse(
             String status,
             String bookingId,
@@ -49,5 +78,11 @@ public final class Dtos {
         public static BookingResponse rejected(String reason, List<String> conflicts) {
             return new BookingResponse("REJECTED", null, null, null, 0, null, reason, conflicts);
         }
+    }
+
+    // --- Release -----------------------------------------------------------
+
+    /** Body of POST /api/shows/{id}/release. */
+    public record ReleaseRequest(String holdId, String holderId) {
     }
 }

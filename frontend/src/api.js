@@ -8,6 +8,8 @@ async function json(res) {
   return res.json();
 }
 
+export const getConfig = () => fetch('/api/config').then(json);
+
 export const getCities = () => fetch('/api/cities').then(json);
 
 export const getMovies = (cityId) =>
@@ -18,12 +20,31 @@ export const getShows = (cityId, movieId) =>
 
 export const getShow = (showId) => fetch(`/api/shows/${showId}`).then(json);
 
-export async function book(showId, seatIds, customerName) {
-  const res = await fetch(`/api/shows/${showId}/book`, {
+// Phase 1: reserve seats for the payment window.
+export async function hold(showId, seatIds, holderId) {
+  const res = await fetch(`/api/shows/${showId}/hold`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ seatIds, customerName }),
+    body: JSON.stringify({ seatIds, holderId }),
   });
-  const data = await json(res);
-  return { ok: res.ok, data };
+  return { ok: res.ok, data: await json(res) };
+}
+
+// Phase 2: turn a hold into a booking.
+export async function confirm(showId, holdId, holderId, customerName) {
+  const res = await fetch(`/api/shows/${showId}/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ holdId, holderId, customerName }),
+  });
+  return { ok: res.ok, data: await json(res) };
+}
+
+// Give up a hold early (user cancelled). Fire-and-forget.
+export function release(showId, holdId, holderId) {
+  return fetch(`/api/shows/${showId}/release`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ holdId, holderId }),
+  }).catch(() => {});
 }

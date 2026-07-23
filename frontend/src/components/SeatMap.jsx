@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { getShow, book } from '../api.js';
+import { getShow, hold as holdSeats } from '../api.js';
+import { holderId } from '../holder.js';
 
 const TIER_LABEL = { REGULAR: 'Regular', PREMIUM: 'Premium', RECLINER: 'Recliner' };
 const TIER_AVAILABLE = {
@@ -10,11 +11,10 @@ const TIER_AVAILABLE = {
 
 const rupees = (n) => `₹${n.toLocaleString('en-IN')}`;
 
-export default function SeatMap({ show, movie, onBooked }) {
+export default function SeatMap({ show, movie, onHeld }) {
   const [detail, setDetail] = useState(null);
   const [booked, setBooked] = useState(new Set());
   const [selected, setSelected] = useState(new Set());
-  const [name, setName] = useState('');
   const [live, setLive] = useState(false);
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -83,16 +83,24 @@ export default function SeatMap({ show, movie, onBooked }) {
     });
   };
 
-  const submit = async () => {
+  const proceed = async () => {
     if (selected.size === 0) return;
     setSubmitting(true);
     setError(null);
     try {
-      const { ok, data } = await book(show.id, [...selected], name.trim() || 'Guest');
-      if (ok && data.status === 'CONFIRMED') {
-        onBooked(data);
+      const seatIds = [...selected];
+      const { ok, data } = await holdSeats(show.id, seatIds, holderId());
+      if (ok && data.status === 'HELD') {
+        // Hand the hold to the payment screen. Note: this does NOT mark the
+        // seats booked for other users — only a confirmed booking does that.
+        onHeld({
+          holdId: data.holdId,
+          seats: data.seats,
+          ttlSeconds: data.ttlSeconds,
+          totalPrice: data.totalPrice,
+        });
       } else {
-        setError(data.reason || 'Booking failed. Please try again.');
+        setError(data.reason || 'Those seats are no longer available.');
         if (data.conflictingSeats?.length) {
           setSelected((prev) => {
             const next = new Set(prev);
@@ -192,18 +200,12 @@ export default function SeatMap({ show, movie, onBooked }) {
             </div>
             <div className="text-2xl font-bold">{rupees(total)}</div>
           </div>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Your name"
-            className="rounded-lg bg-ink/70 border border-edge px-3 py-2 text-sm outline-none focus:border-indigo-400 w-full sm:w-40"
-          />
           <button
-            onClick={submit}
+            onClick={proceed}
             disabled={selected.size === 0 || submitting}
             className="rounded-lg px-6 py-2.5 font-semibold bg-gradient-to-r from-indigo-500 to-amber-500 text-white disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-110 transition"
           >
-            {submitting ? 'Booking…' : 'Pay & Book'}
+            {submitting ? 'Holding…' : 'Proceed to Pay'}
           </button>
         </div>
       </div>

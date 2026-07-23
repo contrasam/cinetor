@@ -3,6 +3,7 @@ import CityGrid from './components/CityGrid.jsx';
 import MovieGrid from './components/MovieGrid.jsx';
 import ShowtimeList from './components/ShowtimeList.jsx';
 import SeatMap from './components/SeatMap.jsx';
+import Payment from './components/Payment.jsx';
 import Confirmation from './components/Confirmation.jsx';
 import Breadcrumb from './components/Breadcrumb.jsx';
 
@@ -12,17 +13,20 @@ export default function App() {
   const [city, setCity] = useState(null);
   const [movie, setMovie] = useState(null);
   const [show, setShow] = useState(null);
+  const [hold, setHold] = useState(null);
   const [confirmation, setConfirmation] = useState(null);
 
   const reset = () => {
     setCity(null);
     setMovie(null);
     setShow(null);
+    setHold(null);
     setConfirmation(null);
   };
 
   let step = 'city';
   if (confirmation) step = 'confirm';
+  else if (hold) step = 'payment';
   else if (show) step = 'seats';
   else if (movie) step = 'shows';
   else if (city) step = 'movies';
@@ -53,10 +57,12 @@ export default function App() {
           onCity={() => {
             setMovie(null);
             setShow(null);
+            setHold(null);
             setConfirmation(null);
           }}
           onMovie={() => {
             setShow(null);
+            setHold(null);
             setConfirmation(null);
           }}
         />
@@ -75,7 +81,17 @@ export default function App() {
           <SeatMap
             show={show}
             movie={movie}
-            onBooked={setConfirmation}
+            onHeld={setHold}
+          />
+        )}
+
+        {step === 'payment' && (
+          <Payment
+            show={show}
+            movie={movie}
+            hold={hold}
+            onConfirmed={setConfirmation}
+            onCancel={() => setHold(null)}
           />
         )}
 

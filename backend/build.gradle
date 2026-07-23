@@ -7,8 +7,6 @@ version = '0.1.0'
 
 repositories {
     mavenCentral()
-    // Fallback for locally-published Cajun builds during development.
-    mavenLocal()
 }
 
 java {
@@ -49,9 +47,12 @@ tasks.named('test') {
     jvmArgs('--enable-preview')
 }
 
-// Convenience: allow overriding the HTTP port via -Pport=xxxx
+// Convenience: -Pport=xxxx sets the HTTP port, -PholdSeconds=N the hold window.
 tasks.named('run') {
     if (project.hasProperty('port')) {
         systemProperty 'cinetor.port', project.property('port')
+    }
+    if (project.hasProperty('holdSeconds')) {
+        systemProperty 'cinetor.holdSeconds', project.property('holdSeconds')
     }
 }
