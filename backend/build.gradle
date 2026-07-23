@@ -1,0 +1,57 @@
+plugins {
+    id 'application'
+}
+
+group = 'io.cinetor'
+version = '0.1.0'
+
+repositories {
+    mavenCentral()
+    // Fallback for locally-published Cajun builds during development.
+    mavenLocal()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+dependencies {
+    // Cajun actor system powers the booking backend.
+    implementation 'com.cajunsystems:cajun:0.7.0'
+
+    // Javalin web framework + JSON.
+    implementation 'io.javalin:javalin:6.3.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+
+    // Logging: Cajun brings logback-classic transitively, which binds SLF4J.
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+application {
+    mainClass = 'io.cinetor.CinetorApp'
+    // Cajun's published classes use Java 21 preview features, so the JVM must
+    // be launched with --enable-preview to load them.
+    applicationDefaultJvmArgs = ['--enable-preview']
+}
+
+// Cajun is compiled with --enable-preview; match it so its classes load.
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs.add('--enable-preview')
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    jvmArgs('--enable-preview')
+}
+
+// Convenience: allow overriding the HTTP port via -Pport=xxxx
+tasks.named('run') {
+    if (project.hasProperty('port')) {
+        systemProperty 'cinetor.port', project.property('port')
+    }
+}
