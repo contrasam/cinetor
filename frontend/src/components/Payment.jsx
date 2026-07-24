@@ -4,6 +4,7 @@ import { holderId } from '../holder.js';
 
 const rupees = (n) => `₹${n.toLocaleString('en-IN')}`;
 const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+const secondsUntil = (deadline) => Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
 
 /**
  * Payment screen shown while the selected seats are held. The seats are blocked
@@ -12,29 +13,38 @@ const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
  * again. Nothing here changes the public seat map; only a confirmed payment does.
  */
 export default function Payment({ show, movie, hold, onConfirmed, onCancel }) {
-  const [remaining, setRemaining] = useState(hold.ttlSeconds);
   const [name, setName] = useState('');
   const [error, setError] = useState(null);
   const [paying, setPaying] = useState(false);
-  const [expired, setExpired] = useState(false);
+  const [rejected, setRejected] = useState(false);
 
-  // Countdown. When it hits zero the backend has already auto-released the hold.
-  // (Navigating away without cancelling also lets the hold expire server-side
-  // after the hold window — no seat stays blocked forever.)
+  // Count down against a fixed wall-clock deadline (client clock, so no server
+  // skew) rather than a decrementing counter, recomputing from Date.now() each
+  // tick. This self-corrects if the tab is frozen and thawed — e.g. restored
+  // from the back-forward cache — instead of drifting.
+  const [deadline] = useState(() => Date.now() + hold.ttlSeconds * 1000);
+  const [remaining, setRemaining] = useState(() => secondsUntil(deadline));
   useEffect(() => {
-    if (remaining <= 0) {
-      setExpired(true);
-      return;
-    }
-    const t = setTimeout(() => setRemaining((r) => r - 1), 1000);
-    return () => clearTimeout(t);
-  }, [remaining]);
+    const tick = () => setRemaining(secondsUntil(deadline));
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [deadline]);
 
-  // Refresh / tab-close during payment can't run React callbacks, so release the
-  // hold via a beacon on page unload. `pagehide` (not `visibilitychange`) is used
-  // so merely switching tabs does not drop the seats.
+  const timedOut = remaining <= 0;
+  const over = timedOut || rejected;
+  const low = remaining <= 30 && !over;
+
+  // A refresh or tab close during payment can't run React callbacks, so release
+  // the hold with a beacon on unload. Skip it when the page is only being stashed
+  // in the back-forward cache (event.persisted): the hold must survive so the
+  // restored page can still pay. `pagehide` (not `visibilitychange`) means simply
+  // switching tabs never drops the seats.
   useEffect(() => {
-    const onExit = () => releaseBeacon(show.id, hold.holdId, holderId());
+    const onExit = (event) => {
+      if (!event.persisted) {
+        releaseBeacon(show.id, hold.holdId, holderId());
+      }
+    };
     window.addEventListener('pagehide', onExit);
     return () => window.removeEventListener('pagehide', onExit);
   }, [show.id, hold.holdId]);
@@ -53,7 +63,7 @@ export default function Payment({ show, movie, hold, onConfirmed, onCancel }) {
         onConfirmed(data);
       } else {
         setError(data.reason || 'Payment could not be completed.');
-        setExpired(true);
+        setRejected(true);
       }
     } catch {
       setError('Could not reach the booking service.');
@@ -67,8 +77,6 @@ export default function Payment({ show, movie, hold, onConfirmed, onCancel }) {
     onCancel();
   };
 
-  const low = remaining <= 30;
-
   return (
     <section className="max-w-md mx-auto">
       <div className="rounded-2xl border border-edge bg-panel/80 p-6">
@@ -77,14 +85,14 @@ export default function Payment({ show, movie, hold, onConfirmed, onCancel }) {
           <span
             className={
               'text-sm font-mono px-2.5 py-1 rounded-full border ' +
-              (expired
+              (over
                 ? 'border-red-500/40 text-red-300 bg-red-500/10'
                 : low
                   ? 'border-amber-500/50 text-amber-300 bg-amber-500/10'
                   : 'border-emerald-500/40 text-emerald-300 bg-emerald-500/10')
             }
           >
-            {expired ? 'expired' : `⏱ ${mmss(remaining)}`}
+            {over ? 'expired' : `⏱ ${mmss(remaining)}`}
           </span>
         </div>
         <p className="text-sm text-slate-400">
@@ -113,7 +121,7 @@ export default function Payment({ show, movie, hold, onConfirmed, onCancel }) {
           </div>
         )}
 
-        {expired ? (
+        {over ? (
           <button
             onClick={cancel}
             className="mt-5 w-full rounded-lg px-6 py-2.5 font-semibold border border-edge hover:border-slate-400 transition"
