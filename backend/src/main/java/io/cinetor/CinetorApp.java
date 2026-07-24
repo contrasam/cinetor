@@ -153,11 +153,24 @@ public final class CinetorApp {
 
             switch (result) {
                 case ShowProtocol.Held held -> {
-                    int ttl = (int) Math.max(0,
-                            (held.expiresAtEpochMs() - System.currentTimeMillis()) / 1000);
-                    ctx.json(Dtos.HoldResponse.held(
-                            held.holdId(), held.seatIds(), held.expiresAtEpochMs(), ttl,
-                            totalPrice(show, held.seatIds())));
+                    // The hold's window is measured from when the request was received
+                    // (that timestamp rides on the command so recovery is deterministic).
+                    // If a long queue wait — e.g. a full mailbox under backpressure —
+                    // consumed the whole window before the hold came back, don't hand the
+                    // client an already-dead hold: release it and ask them to retry. The
+                    // TTL is computed here, at response time, so it always reflects the
+                    // true remaining window.
+                    int ttl = (int) ((held.expiresAtEpochMs() - System.currentTimeMillis()) / 1000);
+                    if (ttl <= 0) {
+                        bookings.release(show, held.holdId(), req.holderId());
+                        ctx.status(HttpStatus.CONFLICT).json(Dtos.HoldResponse.rejected(
+                                "The system was busy and the hold expired before it could be returned. "
+                                        + "Please try again.", List.of()));
+                    } else {
+                        ctx.json(Dtos.HoldResponse.held(
+                                held.holdId(), held.seatIds(), held.expiresAtEpochMs(), ttl,
+                                totalPrice(show, held.seatIds())));
+                    }
                 }
                 case ShowProtocol.Rejected no -> ctx.status(HttpStatus.CONFLICT)
                         .json(Dtos.HoldResponse.rejected(no.reason(), no.conflictingSeats()));
