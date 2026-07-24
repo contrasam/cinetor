@@ -42,6 +42,10 @@ public class StatefulShowActor implements StatefulHandler<ShowState, ShowProtoco
     private final Set<String> validSeatIds;
     private final long holdMillis;
 
+    // This handler instance is reused for the actor's whole life, including across
+    // a restart's replay, so a plain field is enough to run one-time recovery work.
+    private boolean expiryTimersArmed = false;
+
     public StatefulShowActor(int rows, int cols, long holdMillis) {
         this.validSeatIds = Seats.validIds(rows, cols);
         this.holdMillis = holdMillis;
@@ -49,6 +53,20 @@ public class StatefulShowActor implements StatefulHandler<ShowState, ShowProtoco
 
     @Override
     public ShowState receive(ShowProtocol.Command message, ShowState state, ActorContext context) {
+        // On the first message after (re)start, re-arm expiry timers for any holds
+        // that came from a snapshot. Those holds are restored directly into the
+        // deserialized state without their Hold command being replayed, so nothing
+        // else schedules their ExpireHold and — on an idle show, where the logical
+        // clock never advances — they would block their seats indefinitely. Holds
+        // that instead arrive via journal replay are armed by handleHold, and the
+        // two sets never overlap (a hold is either captured in the snapshot or
+        // replayed after it), so this is not double-scheduling; even if it were, a
+        // duplicate ExpireHold is a harmless no-op.
+        if (!expiryTimersArmed) {
+            expiryTimersArmed = true;
+            armSnapshotHoldExpiry(state, context);
+        }
+
         // Drive time from the command's timestamp, not the wall clock, so replay is
         // deterministic. Reads and self-scheduled expiry carry no timestamp, so they
         // reuse the latest logical time the actor has seen.
@@ -122,6 +140,21 @@ public class StatefulShowActor implements StatefulHandler<ShowState, ShowProtoco
         // NOTE: no SSE broadcast here — a hold must not change the public seat map.
         reply(context, new ShowProtocol.Held(holdId, seatHold.seatIds(), expiresAt));
         return state.withHold(seatHold);
+    }
+
+    /**
+     * Schedules an {@link ShowProtocol.ExpireHold} for every hold already present
+     * in {@code state} at first message, using the time remaining until each hold's
+     * original expiry (0 if already lapsed → frees its seats at once). These are the
+     * holds restored from a snapshot; holds that arrive via journal replay are armed
+     * by {@link #handleHold} instead.
+     */
+    private void armSnapshotHoldExpiry(ShowState state, ActorContext context) {
+        long now = System.currentTimeMillis();
+        for (SeatHold hold : state.holdsById().values()) {
+            long delayMs = Math.max(0, hold.expiresAtEpochMs() - now);
+            context.tellSelf(new ShowProtocol.ExpireHold(hold.holdId()), delayMs, TimeUnit.MILLISECONDS);
+        }
     }
 
     private ShowState handleConfirm(ShowProtocol.Confirm confirm, ShowState state, ActorContext context) {

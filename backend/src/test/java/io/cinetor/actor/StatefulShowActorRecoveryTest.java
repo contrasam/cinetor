@@ -117,6 +117,26 @@ class StatefulShowActorRecoveryTest {
     }
 
     @Test
+    void snapshotRestoredHoldIsArmedForExpiryOnFirstMessage() {
+        // Simulate recovery from a snapshot: a hold is already present in the state
+        // this actor instance is handed, but its Hold command was never replayed
+        // (it predates the snapshot). The first message must arm its ExpireHold so
+        // it doesn't block seats forever on an idle show.
+        StatefulShowActor actor = new StatefulShowActor(5, 5, HOLD_MS);
+        StubContext ctx = new StubContext();
+        ShowState restored = ShowState.empty()
+                .withHold(new SeatHold("HOLD-SNAP", "holder-1", T + HOLD_MS, List.of("A1")));
+
+        // First message after restart (the warm-up read).
+        actor.receive(new ShowProtocol.GetSnapshot(), restored, ctx);
+
+        assertEquals("HOLD-SNAP", ctx.lastSelfMessageHoldId,
+                "the snapshot-restored hold must be scheduled for expiry");
+        assertEquals(0L, ctx.lastExpireDelayMs,
+                "its window is long past, so it should expire immediately");
+    }
+
+    @Test
     void liveHoldSchedulesExpiryAtFullWindow() {
         // A fresh hold created "now" schedules expiry roughly a full window out.
         StubContext ctx = new StubContext();
@@ -134,9 +154,10 @@ class StatefulShowActorRecoveryTest {
      * commands without emitting side effects to the outside world.
      */
     private static final class StubContext implements ActorContext {
-        // Records the delay of the most recent scheduled self-message (the
-        // ExpireHold timer), so tests can assert when expiry is scheduled for.
+        // Records the most recent scheduled self-message (the ExpireHold timer):
+        // its delay and target hold id, so tests can assert expiry scheduling.
         long lastExpireDelayMs = -1;
+        String lastSelfMessageHoldId = null;
 
         @Override public Optional<Pid> getSender() {
             return Optional.empty();
@@ -146,6 +167,9 @@ class StatefulShowActorRecoveryTest {
         }
         @Override public <T> void tellSelf(T message, long delay, TimeUnit unit) {
             lastExpireDelayMs = unit.toMillis(delay);
+            if (message instanceof ShowProtocol.ExpireHold expire) {
+                lastSelfMessageHoldId = expire.holdId();
+            }
         }
         @Override public <T> void tellSelf(T message) {
         }
