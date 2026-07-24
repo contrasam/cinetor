@@ -244,9 +244,19 @@ public final class CinetorApp {
         // are warm: otherwise the health endpoint would report ready while cold
         // actors are still initialising, and a readiness probe could route traffic
         // that then times out with a 500. The ask path doesn't need the web server.
-        long warmedMs = bookings.warmUp(catalogue.allShows());
-        if (warmedMs > 0) {
-            log.info("Warmed {} seat actors in {} ms", catalogue.allShows().size(), warmedMs);
+        BookingService.WarmUpResult warm = bookings.warmUp(catalogue.allShows());
+        if (warm.total() > 0) {
+            if (warm.complete()) {
+                log.info("Warmed {} seat actors in {} ms", warm.total(), warm.elapsedMs());
+            } else {
+                // Fail-open: we still start (serving the actors that are ready), but
+                // make the shortfall visible instead of swallowing it. A lingering
+                // gap here points at an actor that cannot recover (e.g. a corrupt
+                // journal), which would 500 on its show until addressed.
+                log.warn("Warm-up incomplete: {}/{} seat actors ready after {} ms; "
+                                + "the remainder will warm on first access (or are failing to recover)",
+                        warm.warmed(), warm.total(), warm.elapsedMs());
+            }
         }
 
         app.start(port);

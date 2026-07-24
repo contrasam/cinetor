@@ -92,6 +92,14 @@ public class BookingService {
         return actors.values();
     }
 
+    /** Outcome of {@link #warmUp}: how many of {@code total} actors confirmed ready. */
+    public record WarmUpResult(int total, int warmed, long elapsedMs) {
+        /** True if every actor replied during warm-up. */
+        public boolean complete() {
+            return warmed >= total;
+        }
+    }
+
     /**
      * Eagerly spawn and initialise every show's actor, in parallel, before the
      * app serves traffic. Only matters for the stateful modes: a persistent actor
@@ -101,11 +109,17 @@ public class BookingService {
      * concurrently overlaps that cost into one short startup pause so users never
      * see a cold-start 500. A no-op in {@code memory} mode (nothing to replay).
      *
-     * @return how long warm-up took, in milliseconds
+     * <p>Warm-up is deliberately <em>fail-open</em>: a per-actor ask that doesn't
+     * reply in time is almost always a slow cold-start (the actor warms moments
+     * later and serves the real request fine), so refusing to start over it would
+     * mean false unreadiness, and hard-failing on one show's unrecoverable journal
+     * would needlessly take down every other show. Instead the result reports how
+     * many actors actually confirmed, so the caller can log a warning when some
+     * did not (e.g. a genuinely un-recoverable actor) rather than failing silently.
      */
-    public long warmUp(Collection<Show> shows) {
+    public WarmUpResult warmUp(Collection<Show> shows) {
         if (!mode.isStateful() || shows.isEmpty()) {
-            return 0;
+            return new WarmUpResult(0, 0, 0);
         }
         long t0 = System.currentTimeMillis();
         // Two concurrent passes. A persistent actor's first message kicks off its
@@ -114,6 +128,7 @@ public class BookingService {
         // later confirms every actor is hot. Firing all shows at once (rather than
         // in batches) lets the inits overlap, and a short per-ask timeout means a
         // straggler resolves quickly instead of stalling the whole pass.
+        int warmed = 0;
         for (int pass = 0; pass < 2; pass++) {
             List<CompletableFuture<?>> inflight = new ArrayList<>();
             for (Show show : shows) {
@@ -126,8 +141,13 @@ public class BookingService {
             } catch (Exception ignored) {
                 // Best-effort: stragglers warm on first real access.
             }
+            // On the final pass, count actors that actually replied (failures were
+            // mapped to null above), so the caller can surface any that didn't.
+            if (pass == 1) {
+                warmed = (int) inflight.stream().filter(f -> f.getNow(null) != null).count();
+            }
         }
-        return System.currentTimeMillis() - t0;
+        return new WarmUpResult(shows.size(), warmed, System.currentTimeMillis() - t0);
     }
 
     private Pid actorFor(Show show) {
