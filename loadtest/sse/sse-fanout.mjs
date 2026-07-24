@@ -77,18 +77,20 @@ function subscribe(id, seat, state) {
               resolveConnected();
               continue;
             }
-            // Any post-snapshot frame is a seat-map broadcast, and the phase
-            // decides whether that's a bug or the delivery we're measuring:
-            //   - HOLD phase: a hold must produce NO broadcast at all, so ANY
-            //     seats-update here is a leak. It must NOT be gated on the seat
-            //     being present — the payload is the public *booked* list, which
-            //     by design excludes held seats, so an erroneous hold broadcast
-            //     would carry a payload without our seat.
-            //   - CONFIRM phase: the frame carrying our seat is the delivery.
-            if (state.phase === 'hold') {
-              state.leaked.add(id); // BUG: a hold broadcast reached subscribers
-            } else if (state.phase === 'confirm' && booked.has(seat) && !state.received.has(id)) {
-              state.received.set(id, Date.now() - state.bookedAt);
+            // Classify by PAYLOAD, not by timing. Only a confirm books our seat,
+            // so the payload alone tells the two broadcasts apart — no reliance on
+            // a phase/time boundary that a delayed frame could cross:
+            //   - contains our seat  -> the confirm broadcast (legitimate delivery);
+            //   - lacks our seat     -> a forbidden broadcast. A hold must not
+            //     broadcast at all, and its payload (the public booked list)
+            //     excludes held seats, so an erroneous hold broadcast is exactly a
+            //     post-snapshot frame WITHOUT our seat — whenever it arrives.
+            if (booked.has(seat)) {
+              if (state.confirmSentAt && !state.received.has(id)) {
+                state.received.set(id, Date.now() - state.confirmSentAt);
+              }
+            } else {
+              state.leaked.add(id); // BUG: a broadcast reached subscribers pre-confirm
             }
           }
         }
@@ -119,10 +121,9 @@ async function main() {
 
   const state = {
     controllers: [],
-    received: new Map(), // subscriberId -> latency ms (post-confirm delivery)
-    leaked: new Set(), // subscriberIds that saw the seat during the hold phase
-    phase: 'hold', // 'hold' until we send confirm, then 'confirm'
-    bookedAt: null,
+    received: new Map(), // subscriberId -> latency ms (confirm-broadcast delivery)
+    leaked: new Set(), // subscriberIds that saw a forbidden broadcast (no-seat payload)
+    confirmSentAt: null, // set just before we POST /confirm
   };
 
   // Open all subscribers and wait for every one to receive its snapshot.
@@ -144,14 +145,15 @@ async function main() {
     process.exit(2);
   }
   const hold = await holdRes.json();
-  // Give any (erroneous) hold broadcast time to arrive before we switch phase.
+  // Brief pause so an immediate hold broadcast (if the backend had that bug)
+  // is clearly observed during the hold window. The leak verdict is computed at
+  // the END, though, so even a slow/delayed forbidden frame is still caught.
   await new Promise((r) => setTimeout(r, 500));
-  const leakedOnHold = state.leaked.size > 0;
 
-  // Confirm: THIS is the only event that should broadcast. Switch phase BEFORE
-  // sending so the fan-out is attributed to the confirm, not counted as a leak.
-  state.bookedAt = Date.now();
-  state.phase = 'confirm';
+  // Confirm: the only event that should broadcast. Record the send time so we
+  // can attribute confirm-broadcast latency; classification is by payload, not
+  // by this timestamp.
+  state.confirmSentAt = Date.now();
   const confRes = await fetch(`${BASE}/api/shows/${SHOW}/confirm`, {
     method: 'POST',
     headers: JSON_HEADERS,
@@ -166,6 +168,9 @@ async function main() {
   await new Promise((r) => setTimeout(r, SETTLE_MS));
   state.controllers.forEach((c) => c.abort());
 
+  // Evaluate the leak verdict only now, after the settle window — a forbidden
+  // broadcast delayed past the hold window still lands in state.leaked.
+  const leakedOnHold = state.leaked.size > 0;
   const latencies = [...state.received.values()].sort((a, b) => a - b);
   const delivered = state.received.size;
   const ratio = ((delivered / N) * 100).toFixed(1);
