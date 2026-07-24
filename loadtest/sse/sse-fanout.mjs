@@ -77,9 +77,16 @@ function subscribe(id, seat, state) {
               resolveConnected();
               continue;
             }
-            // A post-snapshot update carrying our seat is the broadcast we booked.
-            if (state.bookedAt && booked.has(seat) && !state.received.has(id)) {
-              state.received.set(id, Date.now() - state.bookedAt);
+            // Any post-snapshot frame carrying our seat is a seat-map broadcast.
+            // Which phase we're in decides whether that's correct or a bug:
+            //   - during the hold phase it must NOT happen (holds don't broadcast);
+            //   - after confirm it's the delivery we're measuring.
+            if (booked.has(seat)) {
+              if (state.phase === 'hold') {
+                state.leaked.add(id); // BUG: a hold broadcast leaked to subscribers
+              } else if (state.phase === 'confirm' && !state.received.has(id)) {
+                state.received.set(id, Date.now() - state.bookedAt);
+              }
             }
           }
         }
@@ -110,9 +117,10 @@ async function main() {
 
   const state = {
     controllers: [],
-    received: new Map(), // subscriberId -> latency ms
+    received: new Map(), // subscriberId -> latency ms (post-confirm delivery)
+    leaked: new Set(), // subscriberIds that saw the seat during the hold phase
+    phase: 'hold', // 'hold' until we send confirm, then 'confirm'
     bookedAt: null,
-    updatesBeforeBooking: 0,
   };
 
   // Open all subscribers and wait for every one to receive its snapshot.
@@ -134,11 +142,14 @@ async function main() {
     process.exit(2);
   }
   const hold = await holdRes.json();
+  // Give any (erroneous) hold broadcast time to arrive before we switch phase.
   await new Promise((r) => setTimeout(r, 500));
-  const leakedOnHold = state.received.size > 0;
+  const leakedOnHold = state.leaked.size > 0;
 
-  // Confirm: THIS is the only event that should broadcast.
+  // Confirm: THIS is the only event that should broadcast. Switch phase BEFORE
+  // sending so the fan-out is attributed to the confirm, not counted as a leak.
   state.bookedAt = Date.now();
+  state.phase = 'confirm';
   const confRes = await fetch(`${BASE}/api/shows/${SHOW}/confirm`, {
     method: 'POST',
     headers: JSON_HEADERS,

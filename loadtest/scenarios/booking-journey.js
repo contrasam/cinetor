@@ -100,10 +100,15 @@ export default function (data) {
       JSON.stringify({ holdId: held.holdId, holderId }),
       JSON_HEADERS,
     );
-    check(rel, {
+    const relOk = check(rel, {
       'release 200': (r) => r.status === 200,
+      // Correctness: releasing my own valid hold must be acknowledged.
       'release acknowledged': (r) => r.json().released === true,
     });
+    if (!relOk) {
+      invariantViolations.add(1);
+      return;
+    }
     releases.add(1);
     return;
   }

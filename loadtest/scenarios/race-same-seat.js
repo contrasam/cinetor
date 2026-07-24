@@ -77,9 +77,13 @@ export default function (data) {
 export function teardown(data) {
   // The winner's hold either expires or persists; either way the public
   // snapshot must never show the seat as booked (a hold is not a booking).
+  // Throwing here fails the whole run (k6 exits non-zero) — a threshold can't
+  // see this check because it only runs once, after all iterations complete.
   const detail = http.get(`${BASE_URL}/api/shows/${SHOW}`).json();
   const seatBooked = (detail.bookedSeats || []).includes(data.seat);
   if (seatBooked) {
-    console.error(`INVARIANT VIOLATION: held seat ${data.seat} leaked into the public booked set`);
+    throw new Error(
+      `INVARIANT VIOLATION: held seat ${data.seat} leaked into the public booked set`,
+    );
   }
 }
