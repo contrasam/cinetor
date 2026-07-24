@@ -48,3 +48,20 @@ export function release(showId, holdId, holderId) {
     body: JSON.stringify({ holdId, holderId }),
   }).catch(() => {});
 }
+
+// Best-effort release during page unload (refresh / tab close), where a normal
+// fetch would be cancelled. sendBeacon queues the request so it still goes out.
+// The server-side hold expiry remains the ultimate guarantee if this doesn't land.
+export function releaseBeacon(showId, holdId, holderId) {
+  try {
+    if (!navigator.sendBeacon) {
+      return;
+    }
+    const body = new Blob([JSON.stringify({ holdId, holderId })], {
+      type: 'application/json',
+    });
+    navigator.sendBeacon(`/api/shows/${showId}/release`, body);
+  } catch {
+    /* best effort — the hold will expire server-side regardless */
+  }
+}

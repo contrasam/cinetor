@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { confirm as confirmBooking, release } from '../api.js';
+import { confirm as confirmBooking, release, releaseBeacon } from '../api.js';
 import { holderId } from '../holder.js';
 
 const rupees = (n) => `₹${n.toLocaleString('en-IN')}`;
@@ -29,6 +29,15 @@ export default function Payment({ show, movie, hold, onConfirmed, onCancel }) {
     const t = setTimeout(() => setRemaining((r) => r - 1), 1000);
     return () => clearTimeout(t);
   }, [remaining]);
+
+  // Refresh / tab-close during payment can't run React callbacks, so release the
+  // hold via a beacon on page unload. `pagehide` (not `visibilitychange`) is used
+  // so merely switching tabs does not drop the seats.
+  useEffect(() => {
+    const onExit = () => releaseBeacon(show.id, hold.holdId, holderId());
+    window.addEventListener('pagehide', onExit);
+    return () => window.removeEventListener('pagehide', onExit);
+  }, [show.id, hold.holdId]);
 
   const pay = async () => {
     setPaying(true);
