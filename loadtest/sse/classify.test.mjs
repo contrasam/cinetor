@@ -36,5 +36,36 @@ expect('other client confirm on top of prior -> ignore',
 expect('our seat among several new seats -> delivery',
   classifyFrame(S([]), S(['F6', 'A1']), 'A1'), 'delivery');
 
+// --- Sequential test: the baseline must ADVANCE per frame, mirroring the
+// subscriber loop, so a hold rebroadcast after an unrelated booking is still
+// caught (review r3643807294). ---
+function runSequence(snapshot, frames, seat) {
+  let seen = new Set(snapshot);
+  const verdicts = [];
+  for (const f of frames) {
+    verdicts.push(classifyFrame(seen, new Set(f), seat));
+    for (const s of f) seen.add(s); // advance running baseline
+  }
+  return verdicts;
+}
+
+function expectSeq(name, got, want) {
+  const ok = JSON.stringify(got) === JSON.stringify(want);
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  (got ${JSON.stringify(got)}, want ${JSON.stringify(want)})`);
+  if (!ok) failures++;
+}
+
+// Other client books X (ignore) -> hold rebroadcasts the cumulative {X} (leak,
+// NOT ignore, because the running baseline already contains X) -> our confirm.
+expectSeq('unrelated booking then hold rebroadcast -> leak',
+  runSequence([], [['X'], ['X'], ['X', 'A1']], 'A1'),
+  ['ignore', 'leak', 'delivery']);
+
+// A frozen baseline would have returned 'ignore' for the middle frame; assert
+// the running baseline does not.
+expectSeq('hold rebroadcast after several bookings -> leak',
+  runSequence(['S0'], [['S0', 'X'], ['S0', 'X', 'Y'], ['S0', 'X', 'Y']], 'A1'),
+  ['ignore', 'ignore', 'leak']);
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} test(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -52,7 +52,10 @@ function subscribe(id, seat, state) {
         const decoder = new TextDecoder();
         let buf = '';
         let sawSnapshot = false;
-        let baseline = new Set(); // booked seats at connect time (per subscriber)
+        // Running (cumulative) set of every booked seat this subscriber has seen.
+        // Advancing it per frame is what lets a hold rebroadcast be caught even
+        // after unrelated bookings have grown the public booked set.
+        let seen = new Set();
 
         while (true) {
           const { value, done } = await reader.read();
@@ -75,18 +78,17 @@ function subscribe(id, seat, state) {
             const booked = new Set(payload.booked || []);
 
             if (!sawSnapshot) {
-              // The first frame is the connect-time snapshot; it is this
-              // subscriber's baseline booked set.
+              // The first frame is the connect-time snapshot; seed the running set.
               sawSnapshot = true;
-              baseline = booked;
+              seen = new Set(booked);
               resolveConnected();
               continue;
             }
-            // Classify against the baseline (see classify.mjs). A legitimate
-            // confirm always adds a seat; a forbidden hold broadcast adds none.
-            // This is timing-independent (a delayed leak is still caught) and
-            // ignores other clients' bookings (they add a different seat).
-            const verdict = classifyFrame(baseline, booked, seat);
+            // Classify against everything seen so far (see classify.mjs). Every
+            // legitimate confirm strictly grows the booked set, so a frame that
+            // adds nothing new is a forbidden broadcast — regardless of timing or
+            // of unrelated bookings that already advanced the set.
+            const verdict = classifyFrame(seen, booked, seat);
             if (verdict === 'delivery') {
               if (state.confirmSentAt && !state.received.has(id)) {
                 state.received.set(id, Date.now() - state.confirmSentAt);
@@ -94,6 +96,9 @@ function subscribe(id, seat, state) {
             } else if (verdict === 'leak') {
               state.leaked.add(id); // BUG: a broadcast that added no seat = a hold broadcast
             }
+            // Advance the running baseline so later frames are judged against
+            // the newest known booked set.
+            for (const s of booked) seen.add(s);
           }
         }
       })

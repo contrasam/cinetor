@@ -1,13 +1,18 @@
 // Classifies one post-snapshot SSE `seats-update` frame for the fan-out check.
 //
-//   baseline: Set of booked seats from this subscriber's connect-time snapshot.
+//   baseline: RUNNING set of every booked seat seen so far (seeded from the
+//             connect-time snapshot and advanced by the caller after each
+//             frame). It must be cumulative, not frozen at connect time —
+//             otherwise a hold that rebroadcasts a booked set already grown by
+//             an unrelated booking would look like it "adds" that seat.
 //   booked:   Set of booked seats carried by this frame.
 //   seat:     the seat this script booked.
 //
-// The key invariant that makes classification robust — without any reliance on
+// The invariant that makes classification robust — without any reliance on
 // timing — is that a legitimate confirm broadcast (ours OR any other client's)
 // ALWAYS adds a seat to the public booked set, whereas a forbidden hold
-// broadcast changes nothing (holds are excluded from the booked list). So:
+// broadcast changes nothing (holds are excluded from the booked list). So,
+// judged against everything seen so far:
 //
 //   - the frame adds OUR seat         -> 'delivery' (our booking's confirm)
 //   - the frame adds NO new seat      -> 'leak'     (a hold must not broadcast)
