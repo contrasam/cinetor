@@ -1,7 +1,9 @@
 package io.cinetor.sse;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.cinetor.metrics.Metrics;
 import io.javalin.http.sse.SseClient;
+import io.micrometer.core.instrument.Counter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,6 +24,19 @@ public class SeatStreamHub {
 
     private final Map<String, Set<SseClient>> clientsByShow = new ConcurrentHashMap<>();
     private final ObjectMapper json = new ObjectMapper();
+    private final Counter broadcasts;
+
+    public SeatStreamHub(Metrics metrics) {
+        metrics.gauge("cinetor.sse.clients", "Connected SSE clients across all shows",
+                this, SeatStreamHub::totalClients);
+        this.broadcasts = Counter.builder("cinetor.sse.broadcasts")
+                .description("Seat-update broadcasts fanned out to SSE clients")
+                .register(metrics.registry());
+    }
+
+    private double totalClients() {
+        return clientsByShow.values().stream().mapToInt(Set::size).sum();
+    }
 
     /** Registers a client for a show and keeps its connection open. */
     public void register(String showId, SseClient client) {
@@ -45,6 +60,7 @@ public class SeatStreamHub {
         for (SseClient client : clients) {
             emit(client, bookedSeats);
         }
+        broadcasts.increment();
         log.info("Broadcast seat update for show {} to {} client(s)", showId, clients.size());
     }
 

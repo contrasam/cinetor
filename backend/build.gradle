@@ -23,6 +23,9 @@ dependencies {
     implementation 'io.javalin:javalin:6.3.0'
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
 
+    // Metrics: Micrometer with a Prometheus scrape endpoint (/api/metrics).
+    implementation 'io.micrometer:micrometer-registry-prometheus:1.13.6'
+
     // Logging: Cajun brings logback-classic transitively, which binds SLF4J.
 
     testImplementation platform('org.junit:junit-bom:5.10.2')

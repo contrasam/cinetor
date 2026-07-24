@@ -93,12 +93,42 @@ non-zero (k6 exit code `99`) — usable directly as a CI gate.
 - **`holderId` is load-bearing.** A hold needs a non-blank `holderId`, and the
   matching `confirm`/`release` must reuse it (a foreign holder gets a `409`). Each
   VU generates a unique, stable id per iteration (`lib/config.js:uid`).
-- **Saturation surfaces as HTTP 500.** `BookingService` uses a 5s actor
-  ask-timeout; on timeout the handler throws and Javalin returns `500`. So a
-  rising **500 rate is the backpressure signal** to watch under overload.
+- **Saturation surfaces as HTTP 500 — and now in the metrics.** `BookingService`
+  uses a 5s actor ask-timeout; on timeout the handler throws and Javalin returns
+  `500`. Watch the client-side 500 rate together with `cinetor_actor_ask_seconds`
+  (climbing p95/p99) and `cinetor_actor_ask_errors_total` (see below) for the
+  server's side of the same story.
 - **The public snapshot excludes holds.** `availableSeats` reads the snapshot, so
   under concurrency two VUs can both pick the "same free" seat and one loses the
   hold race — that's correct behaviour and shows up as `biz_holds_rejected`.
+
+## Server-side metrics (during a run)
+
+The client-side k6 numbers only see the outside of the box. The backend also
+exposes Prometheus metrics at **`GET /api/metrics`** (Micrometer), which show the
+one thing k6 can't: what the actors are doing. Scrape it with a Prometheus
+server, or just eyeball it during a run:
+
+```bash
+watch -n1 'curl -s localhost:7070/api/metrics | grep -E "^cinetor_(actor_ask_seconds\{|hold_total|confirm_total|actor_ask_errors|sse_)"'
+```
+
+Key series:
+
+| Metric | Why it matters |
+|---|---|
+| `cinetor_actor_ask_seconds{op="hold\|confirm\|release\|snapshot"}` | Per-op seat-actor latency (mailbox wait + processing), with p50/p95/p99. This is what the 5s ask-timeout is racing — the truest saturation signal. |
+| `cinetor_actor_ask_errors_total{op=...}` | Asks that timed out/failed. Non-zero = the actor couldn't keep up and clients saw HTTP 500. |
+| `cinetor_hold_total{result="held\|rejected"}` | Hold outcomes. A high `rejected` share is contention (many users racing for the same seats) — expected, and worth watching. |
+| `cinetor_confirm_total{result="confirmed\|rejected"}` | Conversions vs holds that expired before payment. |
+| `cinetor_release_total{result=...}` | Explicit cancellations. |
+| `cinetor_http_server_requests_seconds{route,method,status}` | Per-endpoint latency/throughput, `route` as the matched template so labels stay low-cardinality. |
+| `cinetor_sse_clients`, `cinetor_sse_broadcasts_total` | Live SSE subscriber count and fan-out volume. |
+| `jvm_*`, `process_cpu_usage`, `jvm_gc_*` | Correlate latency spikes with GC pauses / memory / CPU. |
+
+To correlate client and server: run a scenario, and after it finishes the
+counters above should reconcile with the k6 `biz_*` counters — e.g. k6
+`biz_confirms_ok` ≈ `cinetor_confirm_total{result="confirmed"}` for that run.
 
 ## Verified sample run
 
