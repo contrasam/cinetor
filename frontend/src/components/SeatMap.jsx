@@ -20,14 +20,20 @@ export default function SeatMap({ show, movie, onHeld }) {
   const [submitting, setSubmitting] = useState(false);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  // Once a live SSE update has arrived it is authoritative; the initial REST
+  // snapshot (which may resolve later and be stale) must not overwrite it.
+  const liveSeenRef = useRef(false);
 
   // Load the seat layout + current bookings.
   useEffect(() => {
     let active = true;
+    liveSeenRef.current = false;
     getShow(show.id).then((d) => {
       if (!active) return;
       setDetail(d);
-      setBooked(new Set(d.bookedSeats));
+      if (!liveSeenRef.current) {
+        setBooked(new Set(d.bookedSeats));
+      }
     });
     return () => {
       active = false;
@@ -42,6 +48,7 @@ export default function SeatMap({ show, movie, onHeld }) {
     es.addEventListener('seats-update', (e) => {
       const data = JSON.parse(e.data);
       const nextBooked = new Set(data.booked);
+      liveSeenRef.current = true;
       setBooked(nextBooked);
       // Drop any of my in-progress picks that someone else just grabbed.
       const mine = selectedRef.current;

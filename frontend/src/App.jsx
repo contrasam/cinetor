@@ -6,6 +6,8 @@ import SeatMap from './components/SeatMap.jsx';
 import Payment from './components/Payment.jsx';
 import Confirmation from './components/Confirmation.jsx';
 import Breadcrumb from './components/Breadcrumb.jsx';
+import { release } from './api.js';
+import { holderId } from './holder.js';
 
 // Simple step-driven flow: city -> movie -> showtime -> seats -> confirmation.
 // State is kept here and threaded down; no router needed for a demo this size.
@@ -16,11 +18,20 @@ export default function App() {
   const [hold, setHold] = useState(null);
   const [confirmation, setConfirmation] = useState(null);
 
+  // Navigating away from an unpaid hold must give the seats back immediately,
+  // rather than leaving them blocked until the server-side hold expires.
+  const dropHold = () => {
+    if (show && hold) {
+      release(show.id, hold.holdId, holderId());
+    }
+    setHold(null);
+  };
+
   const reset = () => {
+    dropHold();
     setCity(null);
     setMovie(null);
     setShow(null);
-    setHold(null);
     setConfirmation(null);
   };
 
@@ -55,14 +66,14 @@ export default function App() {
           step={step}
           onHome={reset}
           onCity={() => {
+            dropHold();
             setMovie(null);
             setShow(null);
-            setHold(null);
             setConfirmation(null);
           }}
           onMovie={() => {
+            dropHold();
             setShow(null);
-            setHold(null);
             setConfirmation(null);
           }}
         />
@@ -90,7 +101,11 @@ export default function App() {
             show={show}
             movie={movie}
             hold={hold}
-            onConfirmed={setConfirmation}
+            onConfirmed={(c) => {
+              // Hold is now a booking; drop it so we never try to release it.
+              setHold(null);
+              setConfirmation(c);
+            }}
             onCancel={() => setHold(null)}
           />
         )}

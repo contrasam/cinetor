@@ -60,11 +60,12 @@ public class ShowActor implements Handler<ShowProtocol.Command> {
     }
 
     private void handleHold(ShowProtocol.Hold hold, long now, ActorContext context) {
-        List<String> requested = hold.seatIds();
-        if (requested == null || requested.isEmpty()) {
+        if (hold.seatIds() == null || hold.seatIds().isEmpty()) {
             reply(context, new ShowProtocol.Rejected("No seats selected", List.of()));
             return;
         }
+        // Collapse duplicate seat ids so a single seat can't be held — or charged — twice.
+        List<String> requested = new ArrayList<>(new LinkedHashSet<>(hold.seatIds()));
         if (!validSeatIds.containsAll(requested)) {
             reply(context, new ShowProtocol.Rejected("One or more seats do not exist", List.of()));
             return;
