@@ -77,16 +77,18 @@ function subscribe(id, seat, state) {
               resolveConnected();
               continue;
             }
-            // Any post-snapshot frame carrying our seat is a seat-map broadcast.
-            // Which phase we're in decides whether that's correct or a bug:
-            //   - during the hold phase it must NOT happen (holds don't broadcast);
-            //   - after confirm it's the delivery we're measuring.
-            if (booked.has(seat)) {
-              if (state.phase === 'hold') {
-                state.leaked.add(id); // BUG: a hold broadcast leaked to subscribers
-              } else if (state.phase === 'confirm' && !state.received.has(id)) {
-                state.received.set(id, Date.now() - state.bookedAt);
-              }
+            // Any post-snapshot frame is a seat-map broadcast, and the phase
+            // decides whether that's a bug or the delivery we're measuring:
+            //   - HOLD phase: a hold must produce NO broadcast at all, so ANY
+            //     seats-update here is a leak. It must NOT be gated on the seat
+            //     being present — the payload is the public *booked* list, which
+            //     by design excludes held seats, so an erroneous hold broadcast
+            //     would carry a payload without our seat.
+            //   - CONFIRM phase: the frame carrying our seat is the delivery.
+            if (state.phase === 'hold') {
+              state.leaked.add(id); // BUG: a hold broadcast reached subscribers
+            } else if (state.phase === 'confirm' && booked.has(seat) && !state.received.has(id)) {
+              state.received.set(id, Date.now() - state.bookedAt);
             }
           }
         }
