@@ -31,7 +31,7 @@ import java.util.UUID;
  *       {@link ShowProtocol.ExpireHold} message.</li>
  * </ul>
  */
-public class ShowActor implements Handler<ShowProtocol.Command> {
+public class ShowActor implements Handler<ShowProtocol.Command>, FaultInjectable {
 
     private final Set<String> validSeatIds;
     private final long holdMillis;
@@ -46,9 +46,28 @@ public class ShowActor implements Handler<ShowProtocol.Command> {
     // the two actors mirrored.
     private final TimerKeeper<String> holdTimers = new TimerKeeper<>();
 
+    // Fault injection (see FaultInjectable). Present for parity with the stateful
+    // actor, but here a panic is genuinely lossy: there is no journal to replay, so
+    // the show's RESTART supervision brings the actor back with an empty seat map.
+    // That contrast is exactly what makes the persistent modes a crash-recovery
+    // story rather than just a latency comparison. Cleared in preStart on restart.
+    private volatile boolean panicArmed = false;
+
     public ShowActor(int rows, int cols, long holdMillis) {
         this.validSeatIds = Seats.validIds(rows, cols);
         this.holdMillis = holdMillis;
+    }
+
+    @Override
+    public void armPanic() {
+        this.panicArmed = true;
+    }
+
+    @Override
+    public void preStart(ActorContext context) {
+        // Runs on every (re)start. Clearing the fault here means a supervised restart
+        // comes back healthy; on a normal first start the latch is already clear.
+        panicArmed = false;
     }
 
     @Override
@@ -104,6 +123,15 @@ public class ShowActor implements Handler<ShowProtocol.Command> {
             reply(context, new ShowProtocol.Rejected(
                     "Some seats are no longer available", List.copyOf(conflicts)));
             return;
+        }
+
+        // Injected fault: panic mid-hold. Unlike the stateful actor there is no
+        // journal here, so nothing has been persisted and every hold is simply lost
+        // when the show's RESTART supervision brings this actor back empty. The latch
+        // stays armed until preStart clears it on that restart.
+        if (panicArmed) {
+            throw new IllegalStateException(
+                    "Injected fault: ShowActor panicked mid-hold for " + hold.holdId());
         }
 
         // Id and expiry come from the command (minted by BookingService) so the

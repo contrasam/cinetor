@@ -209,6 +209,27 @@ public final class CinetorApp {
             }
         });
 
+        // --- Chaos: inject a crash (supervision + recovery demo) ---------------
+        // Arms a one-shot panic on the show's seat actor: its next hold throws
+        // mid-flight, its supervising TheatreActor restarts it, and — in the stateful
+        // modes — recovery replays the journal so already-held/booked seats survive.
+        // This is what turns the persistence modes into a crash-recovery story; see
+        // the README's "Supervision & crash recovery" section.
+
+        app.post("/api/shows/{showId}/_panic", ctx -> {
+            Show show = requireShow(catalogue, ctx);
+            if (show == null) {
+                return;
+            }
+            boolean armed = bookings.armPanic(show);
+            ctx.json(Map.of(
+                    "armed", armed,
+                    "actorMode", mode.label(),
+                    "note", mode.isStateful()
+                            ? "Next hold will crash this show; the theatre restarts it and it recovers held seats from the journal."
+                            : "Next hold will crash this show; it restarts empty (memory mode has no journal to recover from)."));
+        });
+
         // --- Release a hold (user cancelled) -----------------------------------
 
         app.post("/api/shows/{showId}/release", ctx -> {

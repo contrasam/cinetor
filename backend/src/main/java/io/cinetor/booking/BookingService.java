@@ -1,17 +1,22 @@
 package io.cinetor.booking;
 
+import com.cajunsystems.Actor;
 import com.cajunsystems.ActorSystem;
 import com.cajunsystems.Pid;
+import com.cajunsystems.SupervisionStrategy;
 import com.cajunsystems.builder.StatefulActorBuilder;
 import com.cajunsystems.config.BackpressureConfig;
 import com.cajunsystems.config.ResizableMailboxConfig;
 import com.cajunsystems.persistence.BatchedMessageJournal;
 import com.cajunsystems.persistence.SnapshotStore;
 import io.cinetor.actor.ActorMode;
+import io.cinetor.actor.FaultInjectable;
 import io.cinetor.actor.ShowActor;
 import io.cinetor.actor.ShowProtocol;
 import io.cinetor.actor.ShowState;
 import io.cinetor.actor.StatefulShowActor;
+import io.cinetor.actor.TheatreActor;
+import io.cinetor.actor.TheatreProtocol;
 import io.cinetor.catalog.CatalogueData;
 import io.cinetor.metrics.Metrics;
 import io.cinetor.model.Catalogue.Show;
@@ -61,6 +66,12 @@ public class BookingService {
     private final BatchedMessageJournal<ShowProtocol.Command> journal;
     private final SnapshotStore<ShowState> snapshots;
     private final Map<String, Pid> actors = new ConcurrentHashMap<>();
+    // One supervising TheatreActor per theatre id — the parent of that theatre's
+    // seat actors. Created lazily alongside the first show that needs it.
+    private final Map<String, Pid> theatres = new ConcurrentHashMap<>();
+    // The seat-actor handler instances, kept so a deliberate crash can be injected
+    // out-of-band (see FaultInjectable). Keyed by show id.
+    private final Map<String, FaultInjectable> faultHandles = new ConcurrentHashMap<>();
 
     public BookingService(ActorSystem system, CatalogueData catalogue, long holdMillis, Metrics metrics) {
         this(system, catalogue, holdMillis, metrics, ActorMode.MEMORY, null, null);
@@ -151,28 +162,79 @@ public class BookingService {
     }
 
     private Pid actorFor(Show show) {
-        return actors.computeIfAbsent(show.id(), id -> switch (mode) {
-            case MEMORY -> system.actorOf(new ShowActor(show.rows(), show.cols(), holdMillis))
-                    .withId("show-" + id)
-                    .spawn();
-            case STATEFUL, STATEFUL_BACKPRESSURE -> spawnStateful(id, show);
+        return actors.computeIfAbsent(show.id(), id -> {
+            // Each seat actor is spawned as a child of its theatre's supervisor, with
+            // a RESTART supervision strategy: a panic restarts just that one show,
+            // leaving the theatre and its other shows untouched. For a persistent show
+            // that restart replays the journal — a recovery — so a mid-hold crash
+            // loses no seats that were already held or booked.
+            Actor<?> theatre = system.getActor(ensureTheatre(show.theatreId()));
+            Pid pid = switch (mode) {
+                case MEMORY -> spawnMemory(id, show, theatre);
+                case STATEFUL, STATEFUL_BACKPRESSURE -> spawnStateful(id, show, theatre);
+            };
+            // Let the theatre record the show it now supervises (observability).
+            system.tell(theatres.get(show.theatreId()), new TheatreProtocol.Watch(id));
+            return pid;
         });
     }
 
+    /** Lazily spawns (once) the supervising TheatreActor for a theatre id. */
+    private Pid ensureTheatre(String theatreId) {
+        return theatres.computeIfAbsent(theatreId, tid ->
+                system.actorOf(new TheatreActor(tid))
+                        .withId("theatre-" + tid)
+                        .withSupervisionStrategy(SupervisionStrategy.RESTART)
+                        .spawn());
+    }
+
+    private Pid spawnMemory(String id, Show show, Actor<?> theatre) {
+        ShowActor handler = new ShowActor(show.rows(), show.cols(), holdMillis);
+        faultHandles.put(id, handler);
+        return system.actorOf(handler)
+                .withId("show-" + id)
+                .withParent(theatre)
+                .withSupervisionStrategy(SupervisionStrategy.RESTART)
+                .spawn();
+    }
+
     @SuppressWarnings("removal") // ResizableMailboxConfig is the only mailbox config the builder accepts in 0.7.0
-    private Pid spawnStateful(String id, Show show) {
+    private Pid spawnStateful(String id, Show show, Actor<?> theatre) {
+        StatefulShowActor handler = new StatefulShowActor(show.rows(), show.cols(), holdMillis);
+        faultHandles.put(id, handler);
         StatefulActorBuilder<ShowState, ShowProtocol.Command> builder =
-                system.statefulActorOf(
-                                new StatefulShowActor(show.rows(), show.cols(), holdMillis),
-                                ShowState.empty())
+                system.statefulActorOf(handler, ShowState.empty())
                         .withId("show-" + id)
-                        .withPersistence(journal, snapshots);
+                        .withPersistence(journal, snapshots)
+                        .withParent(theatre)
+                        .withSupervisionStrategy(SupervisionStrategy.RESTART);
         if (mode.usesBackpressure()) {
             builder = builder
                     .withBackpressureConfig(backpressureConfig())
                     .withMailboxConfig(mailboxConfig());
         }
         return builder.spawn();
+    }
+
+    /**
+     * Arms a one-shot, deliberate crash on a show's seat actor: the next hold it
+     * processes panics mid-flight (see {@link FaultInjectable}). The supervising
+     * theatre restarts the actor; in a stateful mode that restart replays the
+     * journal and the held seats survive, which is the crash-recovery demo. A no-op
+     * if the show's actor has not been spawned yet.
+     */
+    public boolean armPanic(Show show) {
+        FaultInjectable handler = faultHandles.get(show.id());
+        if (handler == null) {
+            // Force the actor into existence so a panic can be armed before any hold.
+            actorFor(show);
+            handler = faultHandles.get(show.id());
+        }
+        if (handler == null) {
+            return false;
+        }
+        handler.armPanic();
+        return true;
     }
 
     /**
