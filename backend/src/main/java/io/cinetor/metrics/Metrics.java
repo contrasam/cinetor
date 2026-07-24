@@ -98,4 +98,16 @@ public final class Metrics {
     public <T> void gauge(String name, String description, T obj, ToDoubleFunction<T> value) {
         Gauge.builder(name, obj, value).description(description).register(registry);
     }
+
+    /**
+     * A constant info gauge advertising the actor mode the backend is running in
+     * ({@code memory | stateful | stateful-backpressure}), so a metrics scrape
+     * alone tells you which configuration produced the numbers.
+     */
+    public void registerModeInfo(String mode) {
+        Gauge.builder("cinetor.actor.mode.info", () -> 1.0)
+                .description("Active actor mode (value is always 1; read the 'mode' tag)")
+                .tag("mode", mode)
+                .register(registry);
+    }
 }

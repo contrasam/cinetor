@@ -12,7 +12,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 /**
  * One {@code ShowActor} exists per screening and owns that show's seat state.
@@ -41,6 +40,12 @@ public class ShowActor implements Handler<ShowProtocol.Command> {
     private final Map<String, SeatHold> holdsById = new HashMap<>();
     private final Map<String, String> seatToHoldId = new HashMap<>();
 
+    // Same expiry-timer reconciliation as StatefulShowActor, so the two behave
+    // identically. This actor never restarts (in-memory only), so the keeper's
+    // cache and the holds map are always in step — but sharing the mechanism keeps
+    // the two actors mirrored.
+    private final TimerKeeper<String> holdTimers = new TimerKeeper<>();
+
     public ShowActor(int rows, int cols, long holdMillis) {
         this.validSeatIds = Seats.validIds(rows, cols);
         this.holdMillis = holdMillis;
@@ -58,6 +63,18 @@ public class ShowActor implements Handler<ShowProtocol.Command> {
             case ShowProtocol.Release release -> handleRelease(release, context);
             case ShowProtocol.ExpireHold expire -> removeHold(expire.holdId());
         }
+        // Arm/forget expiry timers to match the current holds (new hold → timer;
+        // confirmed/released/expired → dropped).
+        holdTimers.reconcile(holdDeadlines(), context, ShowProtocol.ExpireHold::new);
+    }
+
+    /** Current hold deadlines (hold id → expiry epoch ms) for the TimerKeeper. */
+    private Map<String, Long> holdDeadlines() {
+        Map<String, Long> deadlines = new HashMap<>();
+        for (SeatHold hold : holdsById.values()) {
+            deadlines.put(hold.holdId(), hold.expiresAtEpochMs());
+        }
+        return deadlines;
     }
 
     private void handleHold(ShowProtocol.Hold hold, long now, ActorContext context) {
@@ -89,14 +106,14 @@ public class ShowActor implements Handler<ShowProtocol.Command> {
             return;
         }
 
-        String holdId = "HOLD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
-        long expiresAt = now + holdMillis;
+        // Id and expiry come from the command (minted by BookingService) so the
+        // in-memory and stateful actors behave identically. The ExpireHold timer is
+        // armed by the TimerKeeper reconcile in receive(), off the new deadline.
+        String holdId = hold.holdId();
+        long expiresAt = hold.atEpochMs() + holdMillis;
         SeatHold seatHold = new SeatHold(holdId, hold.holderId(), expiresAt, List.copyOf(requested));
         holdsById.put(holdId, seatHold);
         requested.forEach(seatId -> seatToHoldId.put(seatId, holdId));
-
-        // Schedule automatic release when the payment window elapses.
-        context.tellSelf(new ShowProtocol.ExpireHold(holdId), holdMillis, TimeUnit.MILLISECONDS);
 
         // NOTE: no SSE broadcast here — a hold must not change the public seat map.
         reply(context, new ShowProtocol.Held(holdId, seatHold.seatIds(), expiresAt));

@@ -1,5 +1,6 @@
 package io.cinetor.actor;
 
+import java.io.Serializable;
 import java.util.List;
 
 /**
@@ -21,8 +22,14 @@ public final class ShowProtocol {
     private ShowProtocol() {
     }
 
-    /** Base type for everything a ShowActor understands. */
-    public sealed interface Command
+    /**
+     * Base type for everything a ShowActor understands.
+     *
+     * <p>Extends {@link Serializable} so commands can be written to the message
+     * journal when a show runs as a persistent stateful actor. The in-memory
+     * mode never serialises them; the cost only applies to the stateful modes.
+     */
+    public sealed interface Command extends Serializable
             permits GetSnapshot, Hold, Confirm, Release, ExpireHold {
     }
 
@@ -30,16 +37,30 @@ public final class ShowProtocol {
     public record GetSnapshot() implements Command {
     }
 
-    /** Reserve seats for {@code holderId} for the hold window. Replies {@link Held} or {@link Rejected}. */
-    public record Hold(List<String> seatIds, String holderId) implements Command {
+    /**
+     * Reserve seats for {@code holderId} for the hold window. Replies
+     * {@link Held} or {@link Rejected}.
+     *
+     * <p>{@code holdId} and {@code atEpochMs} are assigned by the caller
+     * ({@code BookingService}), not inside the actor. That is deliberate: a
+     * stateful actor recovers by <em>replaying</em> these commands through its
+     * handler, so anything the handler derives from {@code UUID.randomUUID()} or
+     * the wall clock would differ on replay and desynchronise the reconstructed
+     * hold from the later {@link Confirm}/{@link Release}/{@link ExpireHold} that
+     * reference it. Carrying the id and timestamp on the command keeps replay
+     * deterministic.
+     */
+    public record Hold(List<String> seatIds, String holderId, String holdId, long atEpochMs)
+            implements Command {
     }
 
-    /** Turn a hold into a booking. Replies {@link Confirmed} or {@link Rejected}. */
-    public record Confirm(String holdId, String holderId, String customerName) implements Command {
+    /** Turn a hold into a booking. {@code atEpochMs} is the request time (see {@link Hold}). */
+    public record Confirm(String holdId, String holderId, String customerName, long atEpochMs)
+            implements Command {
     }
 
-    /** Manually release a hold (e.g. the user cancelled). Replies {@link Released}. */
-    public record Release(String holdId, String holderId) implements Command {
+    /** Manually release a hold (e.g. the user cancelled). {@code atEpochMs} is the request time. */
+    public record Release(String holdId, String holderId, long atEpochMs) implements Command {
     }
 
     /** Self-scheduled message that fires when a hold's window elapses. No reply. */

@@ -51,6 +51,37 @@ immediately.
 
 ---
 
+## Actor modes: in-memory vs. persistent vs. backpressure
+
+The seat actor's **persistence model** is a runtime choice — the same booking
+logic, spawned three different ways:
+
+| Mode | Actor | Survives a restart? | Mailbox |
+|---|---|---|---|
+| `memory` (default) | `ShowActor`, in-memory state | No — every show starts fresh | unbounded |
+| `stateful` | `StatefulShowActor` + Cajun journal/snapshots | **Yes** — holds/bookings replay from disk | unbounded |
+| `stateful-backpressure` | `StatefulShowActor` + persistence + bounded mailbox | **Yes** | bounded, backpressure (BLOCK) |
+
+```bash
+cd backend
+ACTOR_MODE=stateful ./gradlew run          # or -PactorMode=stateful-backpressure
+```
+
+The active mode is reported by `GET /api/config` and logged at startup. The
+stateful modes journal every command to `./cajun_persistence` and rebuild state
+on restart; the trade-off is journaling latency on each hold/confirm. A ready-to-run
+**comparison harness** (`loadtest/compare/`) drives all three under load and
+renders a side-by-side report — see
+[`loadtest/compare/README.md`](loadtest/compare/README.md) and its
+[`RESULTS.md`](loadtest/compare/RESULTS.md). In short, on a spread booking load:
+
+- **memory** — hold p50 ~12 ms, highest throughput; loses everything on restart.
+- **stateful** — hold p50 ~90 ms (the journal's batch-flush window), several-fold
+  lower throughput; durable across restarts.
+- **stateful-backpressure** — same as `stateful` under normal load (the batched
+  journal keeps mailboxes shallow, so backpressure stays dormant); the bounded
+  mailbox is a memory safety-net for genuine single-actor overload.
+
 ## Tech stack
 
 | Layer     | Tech                                                             |
@@ -100,7 +131,9 @@ classes use Java 21 preview features, so the app is launched with
 
 Override the port with `-Pport=8080` or the `PORT` env var. The 5-minute seat
 hold can be shortened for demos with `-PholdSeconds=30` (or the `HOLD_SECONDS`
-env var) — handy for watching a hold auto-release.
+env var) — handy for watching a hold auto-release. Choose the seat-actor
+persistence model with `-PactorMode=stateful` (or `ACTOR_MODE`); see
+[Actor modes](#actor-modes-in-memory-vs-persistent-vs-backpressure).
 
 ### 2. Start the frontend (port 5173)
 
@@ -132,7 +165,7 @@ separate "user"):
 
 | Method | Path                                             | Description                             |
 |--------|--------------------------------------------------|-----------------------------------------|
-| GET    | `/api/config`                                    | UI config (e.g. `holdSeconds`)          |
+| GET    | `/api/config`                                    | UI config (`holdSeconds`, `actorMode`)  |
 | GET    | `/api/cities`                                    | List cities                             |
 | GET    | `/api/cities/{cityId}/movies`                    | Movies showing in a city                |
 | GET    | `/api/cities/{cityId}/movies/{movieId}/shows`    | Shows grouped by theatre                |
@@ -178,9 +211,11 @@ expired by the time you pay, `/confirm` returns **409** as well.
 
 - The catalogue (cities, movies, theatres, shows) is static seed data. The
   interesting, stateful part is the live seat booking handled by actors.
-- Seat state (bookings and holds) is held **in memory** by each `ShowActor`, so
-  restarting the backend starts every show fresh. (Cajun also supports persistent
-  stateful actors; this demo intentionally keeps it in-memory.)
+- By default, seat state (bookings and holds) is held **in memory** by each
+  `ShowActor`, so restarting the backend starts every show fresh. Cajun also
+  supports **persistent stateful actors**, and Cinetor now exposes that as the
+  `stateful` / `stateful-backpressure` [actor modes](#actor-modes-in-memory-vs-persistent-vs-backpressure) —
+  in those modes seat state is journaled to disk and rebuilt on restart.
 - Holds auto-expire via a self-scheduled actor message, so no seat stays blocked
   forever even if a browser is closed mid-payment.
 
@@ -222,7 +257,7 @@ seats, never held ones.
 | **Request omits `holderId`** | Rejected up front with a controlled `409` "Missing holder id"; a null owner is never stored, so confirm/release can't NPE. | `ShowActor.handleHold` |
 | **A seat you selected gets booked mid-selection** | The SSE update drops it from your selection and shows a notice, so you can't try to pay for a taken seat. | `SeatMap` seats-update handler |
 | **SSE update arrives before the initial REST load** | The live update wins; a late REST snapshot can't overwrite newer booked state (guarded by a `liveSeen` ref). | `SeatMap` |
-| **Backend restart** | State is in-memory, so every show starts fresh (no stale holds or bookings). | `ShowActor` |
+| **Backend restart** | In `memory` mode, state is in-memory so every show starts fresh; in the `stateful` modes, holds and bookings are replayed from the journal and survive the restart. | `ShowActor` / `StatefulShowActor` |
 
 ### The one deliberate trade-off
 

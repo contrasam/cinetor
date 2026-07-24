@@ -27,9 +27,18 @@ loadtest/
 │   └── single-show-ceiling.js # saturation: one actor's throughput ceiling
 ├── sse/
 │   └── sse-fanout.mjs         # SSE fan-out + broadcast-correctness (Node)
+├── compare/                   # actor-mode comparison (memory vs stateful vs backpressure)
+│   ├── bench.mjs              # dependency-free load driver + metrics scrape
+│   ├── run-compare.sh         # runs all three modes -> RESULTS.md
+│   └── README.md
 ├── run.sh                     # convenience runner
 └── README.md
 ```
+
+> **Comparing actor modes.** The seat actor can run in-memory, persistent
+> (`stateful`), or persistent-with-backpressure. The `compare/` harness drives
+> the same workload against each and renders a side-by-side report — see
+> [`compare/README.md`](compare/README.md).
 
 ## Prerequisites
 
@@ -134,6 +143,8 @@ Key series:
 | `cinetor_release_total{result=...}` | Explicit cancellations. |
 | `cinetor_http_server_requests_seconds{route,method,status}` | Per-endpoint latency/throughput, `route` as the matched template so labels stay low-cardinality. |
 | `cinetor_sse_clients`, `cinetor_sse_broadcasts_total` | Live SSE subscriber count and fan-out volume. |
+| `cinetor_actor_mode_info{mode=...}` | Which actor mode the backend is running (`memory` \| `stateful` \| `stateful-backpressure`). |
+| `cinetor_backpressure_max_fill_ratio`, `..._max_mailbox_size`, `..._active_actors`, `..._dropped` | Mailbox pressure across the seat actors — only meaningful in `stateful-backpressure` mode; 0 otherwise. |
 | `jvm_*`, `process_cpu_usage`, `jvm_gc_*` | Correlate latency spikes with GC pauses / memory / CPU. |
 
 To correlate client and server: run a scenario, and after it finishes the

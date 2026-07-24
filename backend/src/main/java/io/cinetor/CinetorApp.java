@@ -1,7 +1,13 @@
 package io.cinetor;
 
 import com.cajunsystems.ActorSystem;
+import com.cajunsystems.config.ThreadPoolFactory;
+import com.cajunsystems.persistence.BatchedMessageJournal;
+import com.cajunsystems.persistence.SnapshotStore;
+import com.cajunsystems.runtime.persistence.PersistenceFactory;
+import io.cinetor.actor.ActorMode;
 import io.cinetor.actor.ShowProtocol;
+import io.cinetor.actor.ShowState;
 import io.cinetor.booking.BookingService;
 import io.cinetor.catalog.CatalogueData;
 import io.cinetor.metrics.Metrics;
@@ -36,11 +42,32 @@ public final class CinetorApp {
     public static void main(String[] args) {
         int port = resolvePort();
         long holdMillis = resolveHoldMillis();
+        ActorMode mode = resolveActorMode();
 
-        ActorSystem system = new ActorSystem();
+        // A backpressure-aware system needs a system-level monitor, which only
+        // exists when the system is built with a BackpressureConfig. The other
+        // modes use the plain no-arg system, exactly as before.
+        ActorSystem system = mode.usesBackpressure()
+                ? new ActorSystem(new ThreadPoolFactory(), BookingService.backpressureConfig())
+                : new ActorSystem();
+
         CatalogueData catalogue = new CatalogueData();
         Metrics metrics = new Metrics();
-        BookingService bookings = new BookingService(system, catalogue, holdMillis, metrics);
+        metrics.registerModeInfo(mode.label());
+
+        // Stateful modes journal every command and snapshot state to disk. One
+        // journal + snapshot store instance serves every show (each is keyed by
+        // the actor id internally). Cajun's file stores root at ./cajun_persistence.
+        BatchedMessageJournal<ShowProtocol.Command> journal = null;
+        SnapshotStore<ShowState> snapshots = null;
+        if (mode.isStateful()) {
+            journal = PersistenceFactory.createBatchedFileMessageJournal();
+            snapshots = PersistenceFactory.createFileSnapshotStore();
+        }
+
+        BookingService bookings = new BookingService(
+                system, catalogue, holdMillis, metrics, mode, journal, snapshots);
+        registerBackpressureMetrics(metrics, system, bookings);
         SeatStreamHub seatStream = new SeatStreamHub(metrics);
 
         Javalin app = Javalin.create(config -> {
@@ -77,9 +104,12 @@ public final class CinetorApp {
         app.get("/api/metrics", ctx ->
                 ctx.contentType("text/plain; version=0.0.4; charset=utf-8").result(metrics.scrape()));
 
-        // Lets the UI show the correct countdown length for held seats.
+        // Lets the UI show the correct countdown length for held seats, and
+        // reports which actor mode the backend is running in.
         app.get("/api/config", ctx ->
-                ctx.json(Map.of("holdSeconds", (int) (holdMillis / 1000))));
+                ctx.json(Map.of(
+                        "holdSeconds", (int) (holdMillis / 1000),
+                        "actorMode", mode.label())));
 
         app.get("/api/cities", ctx -> ctx.json(catalogue.cities()));
 
@@ -123,11 +153,24 @@ public final class CinetorApp {
 
             switch (result) {
                 case ShowProtocol.Held held -> {
-                    int ttl = (int) Math.max(0,
-                            (held.expiresAtEpochMs() - System.currentTimeMillis()) / 1000);
-                    ctx.json(Dtos.HoldResponse.held(
-                            held.holdId(), held.seatIds(), held.expiresAtEpochMs(), ttl,
-                            totalPrice(show, held.seatIds())));
+                    // The hold's window is measured from when the request was received
+                    // (that timestamp rides on the command so recovery is deterministic).
+                    // If a long queue wait — e.g. a full mailbox under backpressure —
+                    // consumed the whole window before the hold came back, don't hand the
+                    // client an already-dead hold: release it and ask them to retry. The
+                    // TTL is computed here, at response time, so it always reflects the
+                    // true remaining window.
+                    int ttl = (int) ((held.expiresAtEpochMs() - System.currentTimeMillis()) / 1000);
+                    if (ttl <= 0) {
+                        bookings.release(show, held.holdId(), req.holderId());
+                        ctx.status(HttpStatus.CONFLICT).json(Dtos.HoldResponse.rejected(
+                                "The system was busy and the hold expired before it could be returned. "
+                                        + "Please try again.", List.of()));
+                    } else {
+                        ctx.json(Dtos.HoldResponse.held(
+                                held.holdId(), held.seatIds(), held.expiresAtEpochMs(), ttl,
+                                totalPrice(show, held.seatIds())));
+                    }
                 }
                 case ShowProtocol.Rejected no -> ctx.status(HttpStatus.CONFLICT)
                         .json(Dtos.HoldResponse.rejected(no.reason(), no.conflictingSeats()));
@@ -194,14 +237,104 @@ public final class CinetorApp {
             seatStream.sendSnapshot(client, bookings.bookedSeats(show));
         }));
 
+        BatchedMessageJournal<ShowProtocol.Command> journalRef = journal;
+        SnapshotStore<ShowState> snapshotsRef = snapshots;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("Shutting down Cinetor...");
             app.stop();
             system.shutdown();
+            if (snapshotsRef != null) {
+                snapshotsRef.close();
+            }
+            // The batched journal flushes on the system shutdown path; nothing else to close.
         }));
 
+        // In the stateful modes, spawn + replay every show's actor up front so the
+        // first real request per show doesn't pay the cold-start init cost (and
+        // possibly time out). No-op in memory mode.
+        //
+        // This runs BEFORE app.start so the HTTP port only opens once the actors
+        // are warm: otherwise the health endpoint would report ready while cold
+        // actors are still initialising, and a readiness probe could route traffic
+        // that then times out with a 500. The ask path doesn't need the web server.
+        BookingService.WarmUpResult warm = bookings.warmUp(catalogue.allShows());
+        if (warm.total() > 0) {
+            if (warm.complete()) {
+                log.info("Warmed {} seat actors in {} ms", warm.total(), warm.elapsedMs());
+            } else {
+                // Fail-open: we still start (serving the actors that are ready), but
+                // make the shortfall visible instead of swallowing it. A lingering
+                // gap here points at an actor that cannot recover (e.g. a corrupt
+                // journal), which would 500 on its show until addressed.
+                log.warn("Warm-up incomplete: {}/{} seat actors ready after {} ms; "
+                                + "the remainder will warm on first access (or are failing to recover)",
+                        warm.warmed(), warm.total(), warm.elapsedMs());
+            }
+        }
+
         app.start(port);
-        log.info("Cinetor backend listening on http://localhost:{}", port);
+        log.info("Cinetor backend listening on http://localhost:{} (actor mode: {})", port, mode.label());
+    }
+
+    /**
+     * Registers gauges that expose what the seat actors' mailboxes are doing under
+     * backpressure. Only meaningful in {@code stateful-backpressure} mode — the
+     * system-level backpressure monitor is absent otherwise, so the gauges simply
+     * report 0 and never throw.
+     */
+    private static void registerBackpressureMetrics(Metrics metrics, ActorSystem system, BookingService bookings) {
+        metrics.gauge("cinetor.backpressure.active.actors",
+                "Seat actors currently in a backpressured state", bookings,
+                b -> b.activeActorPids().stream()
+                        .filter(pid -> safeBackpressureActive(system, pid))
+                        .count());
+        metrics.gauge("cinetor.backpressure.max.fill.ratio",
+                "Highest mailbox fill ratio across all seat actors (0..1)", bookings,
+                b -> b.activeActorPids().stream()
+                        .mapToDouble(pid -> safeFillRatio(system, pid))
+                        .max().orElse(0.0));
+        metrics.gauge("cinetor.backpressure.max.mailbox.size",
+                "Largest current mailbox size across all seat actors", bookings,
+                b -> b.activeActorPids().stream()
+                        .mapToDouble(pid -> safeMailboxSize(system, pid))
+                        .max().orElse(0.0));
+        metrics.gauge("cinetor.backpressure.dropped.total",
+                "Total messages dropped by backpressure across all seat actors", bookings,
+                b -> b.activeActorPids().stream()
+                        .mapToDouble(pid -> safeDropped(system, pid))
+                        .sum());
+    }
+
+    private static boolean safeBackpressureActive(ActorSystem system, com.cajunsystems.Pid pid) {
+        try {
+            return system.isBackpressureActive(pid);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    private static double safeFillRatio(ActorSystem system, com.cajunsystems.Pid pid) {
+        try {
+            return system.getBackpressureStatus(pid).getFillRatio();
+        } catch (RuntimeException e) {
+            return 0.0;
+        }
+    }
+
+    private static double safeMailboxSize(ActorSystem system, com.cajunsystems.Pid pid) {
+        try {
+            return system.getBackpressureStatus(pid).getCurrentSize();
+        } catch (RuntimeException e) {
+            return 0.0;
+        }
+    }
+
+    private static double safeDropped(ActorSystem system, com.cajunsystems.Pid pid) {
+        try {
+            return system.getBackpressureStatus(pid).getDroppedMessageCount();
+        } catch (RuntimeException e) {
+            return 0.0;
+        }
     }
 
     /** Resolves the show from the path, writing a 404 and returning null if unknown. */
@@ -230,6 +363,19 @@ public final class CinetorApp {
         } catch (NumberFormatException e) {
             return 7070;
         }
+    }
+
+    /**
+     * Actor mode. Defaults to {@code memory} (the demo's original behaviour);
+     * override with {@code -Dcinetor.actorMode=stateful} (or the {@code ACTOR_MODE}
+     * env var). Accepts {@code memory | stateful | stateful-backpressure}.
+     */
+    private static ActorMode resolveActorMode() {
+        String prop = System.getProperty("cinetor.actorMode");
+        if (prop == null) {
+            prop = System.getenv("ACTOR_MODE");
+        }
+        return ActorMode.fromConfig(prop);
     }
 
     /** Hold window in ms. Defaults to 5 minutes; override with -Dcinetor.holdSeconds=N. */
