@@ -12,6 +12,8 @@
 //
 //   BASE_URL=http://localhost:7070 SUBSCRIBERS=200 node sse/sse-fanout.mjs
 
+import { classifyFrame } from './classify.mjs';
+
 const BASE = process.env.BASE_URL || 'http://localhost:7070';
 const SHOW = process.env.SHOW_ID || 'bom-spirited-regal-bom-1215';
 const N = parseInt(process.env.SUBSCRIBERS || '200', 10);
@@ -50,6 +52,7 @@ function subscribe(id, seat, state) {
         const decoder = new TextDecoder();
         let buf = '';
         let sawSnapshot = false;
+        let baseline = new Set(); // booked seats at connect time (per subscriber)
 
         while (true) {
           const { value, done } = await reader.read();
@@ -72,25 +75,24 @@ function subscribe(id, seat, state) {
             const booked = new Set(payload.booked || []);
 
             if (!sawSnapshot) {
-              // The first frame is the connect-time snapshot.
+              // The first frame is the connect-time snapshot; it is this
+              // subscriber's baseline booked set.
               sawSnapshot = true;
+              baseline = booked;
               resolveConnected();
               continue;
             }
-            // Classify by PAYLOAD, not by timing. Only a confirm books our seat,
-            // so the payload alone tells the two broadcasts apart — no reliance on
-            // a phase/time boundary that a delayed frame could cross:
-            //   - contains our seat  -> the confirm broadcast (legitimate delivery);
-            //   - lacks our seat     -> a forbidden broadcast. A hold must not
-            //     broadcast at all, and its payload (the public booked list)
-            //     excludes held seats, so an erroneous hold broadcast is exactly a
-            //     post-snapshot frame WITHOUT our seat — whenever it arrives.
-            if (booked.has(seat)) {
+            // Classify against the baseline (see classify.mjs). A legitimate
+            // confirm always adds a seat; a forbidden hold broadcast adds none.
+            // This is timing-independent (a delayed leak is still caught) and
+            // ignores other clients' bookings (they add a different seat).
+            const verdict = classifyFrame(baseline, booked, seat);
+            if (verdict === 'delivery') {
               if (state.confirmSentAt && !state.received.has(id)) {
                 state.received.set(id, Date.now() - state.confirmSentAt);
               }
-            } else {
-              state.leaked.add(id); // BUG: a broadcast reached subscribers pre-confirm
+            } else if (verdict === 'leak') {
+              state.leaked.add(id); // BUG: a broadcast that added no seat = a hold broadcast
             }
           }
         }
