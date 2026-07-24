@@ -4,6 +4,7 @@ import com.cajunsystems.ActorSystem;
 import io.cinetor.actor.ShowProtocol;
 import io.cinetor.booking.BookingService;
 import io.cinetor.catalog.CatalogueData;
+import io.cinetor.metrics.Metrics;
 import io.cinetor.model.Catalogue.Show;
 import io.cinetor.model.Seats;
 import io.cinetor.model.Seats.Seat;
@@ -17,6 +18,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Cinetor backend entry point.
@@ -37,17 +39,43 @@ public final class CinetorApp {
 
         ActorSystem system = new ActorSystem();
         CatalogueData catalogue = new CatalogueData();
-        BookingService bookings = new BookingService(system, catalogue, holdMillis);
-        SeatStreamHub seatStream = new SeatStreamHub();
+        Metrics metrics = new Metrics();
+        BookingService bookings = new BookingService(system, catalogue, holdMillis, metrics);
+        SeatStreamHub seatStream = new SeatStreamHub(metrics);
 
         Javalin app = Javalin.create(config -> {
             config.bundledPlugins.enableCors(cors -> cors.addRule(rule -> rule.anyHost()));
             config.showJavalinBanner = false;
         });
 
+        // Time every request, tagged by matched route + status class, so per-endpoint
+        // latency and throughput show up in /api/metrics alongside the actor timings.
+        app.before(ctx -> ctx.attribute("startNanos", System.nanoTime()));
+        app.after(ctx -> {
+            Long start = ctx.attribute("startNanos");
+            if (start == null) {
+                return;
+            }
+            // The matched route template (e.g. /api/shows/{showId}); keeps label
+            // cardinality bounded. Unmatched requests (404s) have no endpoint path.
+            String route;
+            try {
+                route = ctx.endpointHandlerPath();
+            } catch (Exception e) {
+                route = "unmatched";
+            }
+            String statusClass = (ctx.statusCode() / 100) + "xx";
+            metrics.httpTimer(ctx.method().name(), route, statusClass)
+                    .record(System.nanoTime() - start, TimeUnit.NANOSECONDS);
+        });
+
         // --- Catalogue browsing -------------------------------------------------
 
         app.get("/api/health", ctx -> ctx.json(Map.of("status", "ok")));
+
+        // Prometheus scrape endpoint for the load-test / observability stack.
+        app.get("/api/metrics", ctx ->
+                ctx.contentType("text/plain; version=0.0.4; charset=utf-8").result(metrics.scrape()));
 
         // Lets the UI show the correct countdown length for held seats.
         app.get("/api/config", ctx ->

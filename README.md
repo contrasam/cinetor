@@ -141,6 +141,8 @@ separate "user"):
 | POST   | `/api/shows/{showId}/confirm`                    | **Phase 2** — confirm hold → booking    |
 | POST   | `/api/shows/{showId}/release`                    | Release a hold early (cancel)           |
 | GET    | `/api/shows/{showId}/stream`                     | SSE stream of `seats-update` events     |
+| GET    | `/api/health`                                    | Liveness probe (`{"status":"ok"}`)      |
+| GET    | `/api/metrics`                                   | Prometheus metrics (Micrometer)         |
 
 **Hold request** (`POST /hold`) — `holderId` identifies the user session:
 
