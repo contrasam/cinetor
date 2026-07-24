@@ -109,9 +109,15 @@ public class StatefulShowActor implements StatefulHandler<ShowState, ShowProtoco
         long expiresAt = hold.atEpochMs() + holdMillis;
         SeatHold seatHold = new SeatHold(holdId, hold.holderId(), expiresAt, List.copyOf(requested));
 
-        // Schedule automatic release when the payment window elapses. On recovery
-        // this re-arms after replaying the Hold, so a rebuilt hold still expires.
-        context.tellSelf(new ShowProtocol.ExpireHold(holdId), holdMillis, TimeUnit.MILLISECONDS);
+        // Schedule automatic release for the time remaining until the hold's
+        // ORIGINAL expiry, not a fresh full window. On recovery this matters: a
+        // hold that already lapsed during downtime gets a 0-delay ExpireHold and
+        // frees its seats immediately, rather than reserving them for up to
+        // another holdMillis after restart. Reading the wall clock here only sets
+        // the timer (a side effect); the persisted expiresAt and the logical clock
+        // keep state reconstruction deterministic.
+        long delayMs = Math.max(0, expiresAt - System.currentTimeMillis());
+        context.tellSelf(new ShowProtocol.ExpireHold(holdId), delayMs, TimeUnit.MILLISECONDS);
 
         // NOTE: no SSE broadcast here — a hold must not change the public seat map.
         reply(context, new ShowProtocol.Held(holdId, seatHold.seatIds(), expiresAt));

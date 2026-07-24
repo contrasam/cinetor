@@ -97,8 +97,10 @@ public class ShowActor implements Handler<ShowProtocol.Command> {
         holdsById.put(holdId, seatHold);
         requested.forEach(seatId -> seatToHoldId.put(seatId, holdId));
 
-        // Schedule automatic release when the payment window elapses.
-        context.tellSelf(new ShowProtocol.ExpireHold(holdId), holdMillis, TimeUnit.MILLISECONDS);
+        // Schedule automatic release for the time remaining until expiry (matches
+        // StatefulShowActor; for a fresh live hold this is simply holdMillis).
+        long delayMs = Math.max(0, expiresAt - System.currentTimeMillis());
+        context.tellSelf(new ShowProtocol.ExpireHold(holdId), delayMs, TimeUnit.MILLISECONDS);
 
         // NOTE: no SSE broadcast here — a hold must not change the public seat map.
         reply(context, new ShowProtocol.Held(holdId, seatHold.seatIds(), expiresAt));

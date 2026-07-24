@@ -44,8 +44,11 @@ class StatefulShowActorRecoveryTest {
 
     /** Replays a command stream from empty state and returns the final state. */
     private ShowState run(List<ShowProtocol.Command> commands) {
+        return run(commands, new StubContext());
+    }
+
+    private ShowState run(List<ShowProtocol.Command> commands, StubContext ctx) {
         StatefulShowActor actor = new StatefulShowActor(5, 5, HOLD_MS);
-        ActorContext ctx = new StubContext();
         ShowState state = ShowState.empty();
         for (ShowProtocol.Command cmd : commands) {
             state = actor.receive(cmd, state, ctx);
@@ -100,6 +103,30 @@ class StatefulShowActorRecoveryTest {
         assertInstanceOf(SeatHold.class, state.holdsById().get("HOLD-4"));
     }
 
+    @Test
+    void replayedLapsedHoldSchedulesImmediateExpiry() {
+        // A hold whose window (T + HOLD_MS) is already long past — the situation on
+        // recovery of an unconfirmed hold. The scheduled ExpireHold must fire for
+        // the REMAINING time (0), not a fresh full window, so the seats free at
+        // once instead of staying blocked for up to another HOLD_MS after restart.
+        StubContext ctx = new StubContext();
+        run(List.of(new ShowProtocol.Hold(List.of("E5"), "holder-1", "HOLD-5", T)), ctx);
+
+        assertEquals(0L, ctx.lastExpireDelayMs,
+                "an already-lapsed hold must schedule expiry immediately on replay");
+    }
+
+    @Test
+    void liveHoldSchedulesExpiryAtFullWindow() {
+        // A fresh hold created "now" schedules expiry roughly a full window out.
+        StubContext ctx = new StubContext();
+        long now = System.currentTimeMillis();
+        run(List.of(new ShowProtocol.Hold(List.of("A1"), "holder-1", "HOLD-6", now)), ctx);
+
+        assertTrue(ctx.lastExpireDelayMs > HOLD_MS - 5_000 && ctx.lastExpireDelayMs <= HOLD_MS,
+                "a live hold should expire about one full window out, was " + ctx.lastExpireDelayMs);
+    }
+
     /**
      * Minimal {@link ActorContext} for driving the handler directly. Mirrors
      * replay: there is no sender, so replies are dropped, and {@code tellSelf}
@@ -107,6 +134,10 @@ class StatefulShowActorRecoveryTest {
      * commands without emitting side effects to the outside world.
      */
     private static final class StubContext implements ActorContext {
+        // Records the delay of the most recent scheduled self-message (the
+        // ExpireHold timer), so tests can assert when expiry is scheduled for.
+        long lastExpireDelayMs = -1;
+
         @Override public Optional<Pid> getSender() {
             return Optional.empty();
         }
@@ -114,7 +145,7 @@ class StatefulShowActorRecoveryTest {
             // no sender in replay; nothing to deliver
         }
         @Override public <T> void tellSelf(T message, long delay, TimeUnit unit) {
-            // expiry scheduling is a side effect we don't need here
+            lastExpireDelayMs = unit.toMillis(delay);
         }
         @Override public <T> void tellSelf(T message) {
         }
