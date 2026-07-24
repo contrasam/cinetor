@@ -89,8 +89,10 @@ public class ShowActor implements Handler<ShowProtocol.Command> {
             return;
         }
 
-        String holdId = "HOLD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
-        long expiresAt = now + holdMillis;
+        // Id and expiry come from the command (minted by BookingService) so the
+        // in-memory and stateful actors behave identically and replay is safe.
+        String holdId = hold.holdId();
+        long expiresAt = hold.atEpochMs() + holdMillis;
         SeatHold seatHold = new SeatHold(holdId, hold.holderId(), expiresAt, List.copyOf(requested));
         holdsById.put(holdId, seatHold);
         requested.forEach(seatId -> seatToHoldId.put(seatId, holdId));

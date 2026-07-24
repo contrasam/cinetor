@@ -49,21 +49,31 @@ public class StatefulShowActor implements StatefulHandler<ShowState, ShowProtoco
 
     @Override
     public ShowState receive(ShowProtocol.Command message, ShowState state, ActorContext context) {
-        long now = System.currentTimeMillis();
-        ShowState current = state.withoutExpired(now);
+        // Drive time from the command's timestamp, not the wall clock, so replay is
+        // deterministic. Reads and self-scheduled expiry carry no timestamp, so they
+        // reuse the latest logical time the actor has seen.
+        long msgTime = switch (message) {
+            case ShowProtocol.Hold hold -> hold.atEpochMs();
+            case ShowProtocol.Confirm confirm -> confirm.atEpochMs();
+            case ShowProtocol.Release release -> release.atEpochMs();
+            case ShowProtocol.GetSnapshot ignored -> state.clockEpochMs();
+            case ShowProtocol.ExpireHold ignored -> state.clockEpochMs();
+        };
+        long now = Math.max(state.clockEpochMs(), msgTime);
+        ShowState current = state.withClock(now).withoutExpired(now);
         return switch (message) {
             case ShowProtocol.GetSnapshot ignored -> {
                 reply(context, new ShowProtocol.Snapshot(List.copyOf(current.booked())));
                 yield current;
             }
-            case ShowProtocol.Hold hold -> handleHold(hold, now, current, context);
+            case ShowProtocol.Hold hold -> handleHold(hold, current, context);
             case ShowProtocol.Confirm confirm -> handleConfirm(confirm, current, context);
             case ShowProtocol.Release release -> handleRelease(release, current, context);
             case ShowProtocol.ExpireHold expire -> current.withoutHold(expire.holdId());
         };
     }
 
-    private ShowState handleHold(ShowProtocol.Hold hold, long now, ShowState state, ActorContext context) {
+    private ShowState handleHold(ShowProtocol.Hold hold, ShowState state, ActorContext context) {
         if (hold.holderId() == null || hold.holderId().isBlank()) {
             reply(context, new ShowProtocol.Rejected("Missing holder id", List.of()));
             return state;
@@ -92,8 +102,11 @@ public class StatefulShowActor implements StatefulHandler<ShowState, ShowProtoco
             return state;
         }
 
-        String holdId = "HOLD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
-        long expiresAt = now + holdMillis;
+        // Id and expiry are derived from the command (assigned by BookingService),
+        // never from UUID/System.currentTimeMillis() here, so replay rebuilds the
+        // identical hold — the later Confirm/Release/ExpireHold reference this id.
+        String holdId = hold.holdId();
+        long expiresAt = hold.atEpochMs() + holdMillis;
         SeatHold seatHold = new SeatHold(holdId, hold.holderId(), expiresAt, List.copyOf(requested));
 
         // Schedule automatic release when the payment window elapses. On recovery

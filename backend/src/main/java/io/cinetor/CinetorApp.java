@@ -236,16 +236,20 @@ public final class CinetorApp {
             // The batched journal flushes on the system shutdown path; nothing else to close.
         }));
 
-        app.start(port);
-
         // In the stateful modes, spawn + replay every show's actor up front so the
         // first real request per show doesn't pay the cold-start init cost (and
         // possibly time out). No-op in memory mode.
+        //
+        // This runs BEFORE app.start so the HTTP port only opens once the actors
+        // are warm: otherwise the health endpoint would report ready while cold
+        // actors are still initialising, and a readiness probe could route traffic
+        // that then times out with a 500. The ask path doesn't need the web server.
         long warmedMs = bookings.warmUp(catalogue.allShows());
         if (warmedMs > 0) {
             log.info("Warmed {} seat actors in {} ms", catalogue.allShows().size(), warmedMs);
         }
 
+        app.start(port);
         log.info("Cinetor backend listening on http://localhost:{} (actor mode: {})", port, mode.label());
     }
 

@@ -30,15 +30,31 @@ import java.util.Set;
  * <p>Copy-on-write is deliberate: producing a fresh state per message is part of
  * what the stateful mode costs relative to the in-memory mode, and the
  * comparison suite measures exactly that.
+ *
+ * <p>{@code clockEpochMs} is a <b>logical clock</b>: the latest request timestamp
+ * the actor has processed. Expiry is judged against it rather than
+ * {@code System.currentTimeMillis()} so that replaying journaled commands during
+ * recovery yields the same expiry decisions it did live — a wall-clock read would
+ * make holds look expired at replay time and drop bookings the commands actually
+ * confirmed.
  */
 public record ShowState(
         Set<String> booked,
         Map<String, SeatHold> holdsById,
-        Map<String, String> seatToHoldId) implements Serializable {
+        Map<String, String> seatToHoldId,
+        long clockEpochMs) implements Serializable {
 
     /** A brand-new show with nothing booked or held. */
     public static ShowState empty() {
-        return new ShowState(new LinkedHashSet<>(), new LinkedHashMap<>(), new LinkedHashMap<>());
+        return new ShowState(new LinkedHashSet<>(), new LinkedHashMap<>(), new LinkedHashMap<>(), 0L);
+    }
+
+    /** A copy whose logical clock has advanced to {@code now} (never moves backwards). */
+    public ShowState withClock(long now) {
+        long advanced = Math.max(clockEpochMs, now);
+        return advanced == clockEpochMs
+                ? this
+                : new ShowState(booked, holdsById, seatToHoldId, advanced);
     }
 
     /** True if the seat is booked or currently held by anyone. */
@@ -54,14 +70,14 @@ public record ShowState(
         for (String seatId : hold.seatIds()) {
             nextIndex.put(seatId, hold.holdId());
         }
-        return new ShowState(booked, nextHolds, nextIndex);
+        return new ShowState(booked, nextHolds, nextIndex, clockEpochMs);
     }
 
     /** A copy with the hold's seats promoted to {@code booked} and the hold removed. */
     public ShowState withHoldConfirmed(SeatHold hold) {
         Set<String> nextBooked = new LinkedHashSet<>(booked);
         nextBooked.addAll(hold.seatIds());
-        return new ShowState(nextBooked, holdsById, seatToHoldId).withoutHold(hold.holdId());
+        return new ShowState(nextBooked, holdsById, seatToHoldId, clockEpochMs).withoutHold(hold.holdId());
     }
 
     /** A copy with the given hold (if any) removed and its seats freed. */
@@ -76,7 +92,7 @@ public record ShowState(
         for (String seatId : hold.seatIds()) {
             nextIndex.remove(seatId, holdId);
         }
-        return new ShowState(booked, nextHolds, nextIndex);
+        return new ShowState(booked, nextHolds, nextIndex, clockEpochMs);
     }
 
     /** A copy with every hold whose window has elapsed dropped (lazy safety net). */

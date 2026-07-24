@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -195,9 +196,14 @@ public class BookingService {
 
     /** Holds seats for the payment window. Reply is a {@code Held} or {@code Rejected}. */
     public Object hold(Show show, List<String> seatIds, String holderId) {
+        // The hold id and request time are minted here, not in the actor, so that
+        // replaying this command during stateful recovery rebuilds the identical
+        // hold (see ShowProtocol.Hold).
+        String holdId = "HOLD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        long now = System.currentTimeMillis();
         Object result = timedAsk("hold", () -> {
-            CompletableFuture<Object> future =
-                    system.ask(actorFor(show), new ShowProtocol.Hold(seatIds, holderId), ASK_TIMEOUT);
+            CompletableFuture<Object> future = system.ask(
+                    actorFor(show), new ShowProtocol.Hold(seatIds, holderId, holdId, now), ASK_TIMEOUT);
             return await(future);
         });
         metrics.outcome("hold", result instanceof ShowProtocol.Held ? "held" : "rejected").increment();
@@ -206,9 +212,10 @@ public class BookingService {
 
     /** Confirms a hold into a booking. Reply is a {@code Confirmed} or {@code Rejected}. */
     public Object confirm(Show show, String holdId, String holderId, String customerName) {
+        long now = System.currentTimeMillis();
         Object result = timedAsk("confirm", () -> {
             CompletableFuture<Object> future = system.ask(
-                    actorFor(show), new ShowProtocol.Confirm(holdId, holderId, customerName), ASK_TIMEOUT);
+                    actorFor(show), new ShowProtocol.Confirm(holdId, holderId, customerName, now), ASK_TIMEOUT);
             return await(future);
         });
         metrics.outcome("confirm", result instanceof ShowProtocol.Confirmed ? "confirmed" : "rejected").increment();
@@ -217,9 +224,10 @@ public class BookingService {
 
     /** Releases a hold (e.g. the user cancelled). */
     public boolean release(Show show, String holdId, String holderId) {
+        long now = System.currentTimeMillis();
         boolean released = timedAsk("release", () -> {
-            CompletableFuture<ShowProtocol.Released> future =
-                    system.ask(actorFor(show), new ShowProtocol.Release(holdId, holderId), ASK_TIMEOUT);
+            CompletableFuture<ShowProtocol.Released> future = system.ask(
+                    actorFor(show), new ShowProtocol.Release(holdId, holderId, now), ASK_TIMEOUT);
             return await(future).released();
         });
         metrics.outcome("release", released ? "released" : "noop").increment();
