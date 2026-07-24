@@ -17,6 +17,12 @@
 //   - the frame adds OUR seat         -> 'delivery' (our booking's confirm)
 //   - the frame adds NO new seat      -> 'leak'     (a hold must not broadcast)
 //   - the frame adds only OTHER seats -> 'ignore'   (another client's booking)
+//
+// Scope: this is exact when the fan-out script is the only booker on the show
+// (its documented isolation precondition). Under concurrent third-party confirms
+// on the SAME show, SSE frames can arrive out of order and a delayed cumulative
+// confirm is indistinguishable from a hold rebroadcast here — so run the probe
+// against a dedicated/idle show. See sse-fanout.mjs's header.
 export function classifyFrame(baseline, booked, seat) {
   let addsOurSeat = false;
   let addsAnySeat = false;

@@ -11,6 +11,17 @@
 // confirm does.
 //
 //   BASE_URL=http://localhost:7070 SUBSCRIBERS=200 node sse/sse-fanout.mjs
+//
+// IMPORTANT — run this against a DEDICATED / idle show (ideally a freshly
+// started backend), like race-same-seat.js. The leak assertion assumes this
+// script is the only booker on the show: it flags any broadcast that adds no
+// new seat as a forbidden hold broadcast. That holds precisely when there are
+// no concurrent third-party confirms. Under simultaneous confirms on the SAME
+// show, SSE frames can be delivered out of order, and a delayed/older
+// cumulative confirm frame is indistinguishable from a hold rebroadcast at the
+// subscriber (both can carry byte-identical payloads) — so a shared show can
+// produce a spurious leak. This is a deliberate scope boundary for a controlled
+// correctness probe, not a defect: point it at an unshared show.
 
 import { classifyFrame } from './classify.mjs';
 

@@ -64,6 +64,16 @@ e.g. `RACE_VUS=500 SHOW_ID=blr-oppenheimer-orion-blr-1200 k6 run scenarios/race-
 | **single-show-ceiling** | Ramping arrival rate at **one** show to find the per-actor ceiling. | Observational — watch latency and the 500 rate climb |
 | **sse-fanout** (Node) | N SSE subscribers on one show; book a seat; verify every subscriber gets it. | 100% delivery **and** hold caused no broadcast |
 
+> **Isolation precondition (race-same-seat and sse-fanout).** Both are controlled
+> correctness probes and assume they are the only booker on their target show —
+> run them against a dedicated/idle show, ideally a freshly started backend. For
+> `sse-fanout` specifically: its leak check flags any broadcast that adds no new
+> seat as a forbidden hold broadcast, which is exact only without concurrent
+> third-party confirms. Under simultaneous confirms on the same show, SSE frames
+> can arrive out of order and a delayed cumulative confirm is indistinguishable
+> from a hold rebroadcast at the subscriber, so a shared show can yield a spurious
+> leak. The frame classifier itself is unit-tested — run `node sse/classify.test.mjs`.
+
 ## Correctness invariants asserted
 
 - **No double-hold** — `race-same-seat`: out of N concurrent racers for one seat,
