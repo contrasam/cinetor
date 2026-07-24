@@ -1,0 +1,118 @@
+# Cinetor backend — load & correctness suite
+
+Load tests for the **backend only** (Javalin + Cajun actors on `:7070`) that
+double as correctness checks. The interesting property of this system isn't raw
+throughput — it's that **a seat can never be double-booked**, because every read
+and write for a show is serialised through that show's single actor. So this
+suite runs two tracks at once:
+
+- **Load** — how much the HTTP layer + actors sustain, and where they degrade.
+- **Correctness under concurrency** — the invariants still hold while it's hot.
+
+Tooling: [**k6**](https://k6.io) for the HTTP scenarios (load + inline
+assertions via `check` and pass/fail `thresholds`), plus a small dependency-free
+**Node** script for the SSE realtime path (k6 v0.54 has no SSE client).
+
+## Layout
+
+```
+loadtest/
+├── lib/
+│   ├── config.js              # BASE_URL, headers, unique holderId generator
+│   └── catalog.js             # show discovery + seat helpers
+├── scenarios/
+│   ├── browse.js              # read-heavy: catalogue browse funnel
+│   ├── booking-journey.js     # write-heavy: hold → confirm/release + invariants
+│   ├── race-same-seat.js      # correctness: N racers, one seat, exactly one wins
+│   └── single-show-ceiling.js # saturation: one actor's throughput ceiling
+├── sse/
+│   └── sse-fanout.mjs         # SSE fan-out + broadcast-correctness (Node)
+├── run.sh                     # convenience runner
+└── README.md
+```
+
+## Prerequisites
+
+- **k6** — https://grafana.com/docs/k6/latest/set-up/install-k6/ (or drop a
+  static binary on your `PATH`).
+- **Node 18+** — for the SSE check only (`fetch` + streams are built in).
+- A **running backend**. From `backend/`:
+
+  ```bash
+  # A short hold window keeps seats churning during a sustained run.
+  HOLD_SECONDS=15 ./gradlew run
+  ```
+
+## Running
+
+```bash
+cd loadtest
+BASE_URL=http://localhost:7070 ./run.sh journey      # or: browse | race | ceiling | sse | all
+```
+
+`run.sh` just wraps `k6 run scenarios/<name>.js` and `node sse/sse-fanout.mjs`.
+Set `K6=/path/to/k6` if it isn't on your `PATH`. Every script also runs directly,
+e.g. `RACE_VUS=500 SHOW_ID=blr-oppenheimer-orion-blr-1200 k6 run scenarios/race-same-seat.js`.
+
+## The scenarios
+
+| Scenario | What it drives | Pass/fail gate (k6 thresholds) |
+|---|---|---|
+| **browse** | Read funnel: `config → movies → shows → show detail`. `GET /shows/{id}` resolves booked seats through the actor. | `http_req_failed < 1%`, `p95 < 250ms`, `p99 < 500ms` |
+| **booking-journey** | One user per iteration across all shows: hold → (15% cancel, 10% abandon, rest pay). Asserts booking invariants inline. | `http_req_failed < 1%`, **`biz_invariant_violations == 0`**, `p95 < 400ms` |
+| **race-same-seat** | N VUs hold the **same** seat simultaneously. | **`race_held` is exactly 1**, `race_errors == 0`, `http_req_failed < 1%` |
+| **single-show-ceiling** | Ramping arrival rate at **one** show to find the per-actor ceiling. | Observational — watch latency and the 500 rate climb |
+| **sse-fanout** (Node) | N SSE subscribers on one show; book a seat; verify every subscriber gets it. | 100% delivery **and** hold caused no broadcast |
+
+## Correctness invariants asserted
+
+- **No double-hold** — `race-same-seat`: out of N concurrent racers for one seat,
+  exactly one gets `HELD`; every other gets a clean `409`, never a `5xx`/timeout.
+- **No double-book** — `booking-journey`: the public booked set never contains a
+  duplicate, and confirmed seats exactly match the held seats.
+- **Holds block but don't broadcast** — `sse-fanout`: a `hold` produces no
+  `seats-update`; only `confirm` does, and it reaches every subscriber.
+- **Hold contract** — a `HELD` reply carries a `HOLD-…` id, a positive TTL, and
+  the requested seats.
+
+Any violation increments a metric wired to a hard threshold, so the run exits
+non-zero (k6 exit code `99`) — usable directly as a CI gate.
+
+## System-specific gotchas (why the scripts do what they do)
+
+- **State is in-memory and monotonic.** Confirmed bookings only accumulate; a
+  sustained write run **will sell shows out**. A `409` (sold out, or a seat lost
+  to a racing user) is therefore an *expected* outcome — the write scenarios call
+  `http.setResponseCallback(http.expectedStatuses(200, 409))` so 409s don't count
+  as errors. Start the backend with a short `HOLD_SECONDS` to recycle abandoned
+  holds, or restart it between runs for a clean slate.
+- **One actor per show = one thread per show.** `single-show-ceiling` hammers a
+  single show to find the per-actor ceiling; `booking-journey` spreads across all
+  ~30 shows to exercise whole-system throughput. Very different numbers — pick the
+  one that matches your question.
+- **`holderId` is load-bearing.** A hold needs a non-blank `holderId`, and the
+  matching `confirm`/`release` must reuse it (a foreign holder gets a `409`). Each
+  VU generates a unique, stable id per iteration (`lib/config.js:uid`).
+- **Saturation surfaces as HTTP 500.** `BookingService` uses a 5s actor
+  ask-timeout; on timeout the handler throws and Javalin returns `500`. So a
+  rising **500 rate is the backpressure signal** to watch under overload.
+- **The public snapshot excludes holds.** `availableSeats` reads the snapshot, so
+  under concurrency two VUs can both pick the "same free" seat and one loses the
+  hold race — that's correct behaviour and shows up as `biz_holds_rejected`.
+
+## Verified sample run
+
+Against the backend on a single dev container (`HOLD_SECONDS=10`), for reference:
+
+- **race-same-seat** (200 VUs, one seat): `race_held = 1`, `race_rejected = 199`,
+  `race_errors = 0`, `http_req_failed = 0%`. ✅ exactly one winner.
+- **booking-journey** (30 VUs, 55s): 242k requests, `0%` failed,
+  **0 invariant violations**, p95 ≈ 14ms; 2.1k confirms, 2.8k holds,
+  52k clean 409s from lost seat-races.
+- **sse-fanout** (150 subscribers): 150/150 delivered, hold caused no broadcast,
+  broadcast latency avg ≈ 33ms.
+- **single-show-ceiling**: one actor sustained ~5.6k snapshot reads/s at peak with
+  sub-millisecond p95 and zero errors.
+
+Your numbers will differ with hardware and `BASE_URL` latency; treat these as a
+shape, not a target.
