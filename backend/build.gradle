@@ -50,12 +50,16 @@ tasks.named('test') {
     jvmArgs('--enable-preview')
 }
 
-// Convenience: -Pport=xxxx sets the HTTP port, -PholdSeconds=N the hold window.
+// Convenience: -Pport=xxxx sets the HTTP port, -PholdSeconds=N the hold window,
+// -PactorMode=memory|stateful|stateful-backpressure the seat-actor flavour.
 tasks.named('run') {
     if (project.hasProperty('port')) {
         systemProperty 'cinetor.port', project.property('port')
     }
     if (project.hasProperty('holdSeconds')) {
         systemProperty 'cinetor.holdSeconds', project.property('holdSeconds')
+    }
+    if (project.hasProperty('actorMode')) {
+        systemProperty 'cinetor.actorMode', project.property('actorMode')
     }
 }

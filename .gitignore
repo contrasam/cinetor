@@ -9,6 +9,9 @@ cajun_persistence/
 logs/
 *.journal
 
+# Comparison harness run artifacts (RESULTS.md is kept; raw runs are not)
+loadtest/compare/results/
+
 # Node / Vite
 frontend/node_modules/
 frontend/dist/

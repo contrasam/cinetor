@@ -1,5 +1,6 @@
 package io.cinetor.actor;
 
+import java.io.Serializable;
 import java.util.List;
 
 /**
@@ -21,8 +22,14 @@ public final class ShowProtocol {
     private ShowProtocol() {
     }
 
-    /** Base type for everything a ShowActor understands. */
-    public sealed interface Command
+    /**
+     * Base type for everything a ShowActor understands.
+     *
+     * <p>Extends {@link Serializable} so commands can be written to the message
+     * journal when a show runs as a persistent stateful actor. The in-memory
+     * mode never serialises them; the cost only applies to the stateful modes.
+     */
+    public sealed interface Command extends Serializable
             permits GetSnapshot, Hold, Confirm, Release, ExpireHold {
     }
 

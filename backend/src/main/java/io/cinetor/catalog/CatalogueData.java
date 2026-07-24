@@ -99,6 +99,11 @@ public final class CatalogueData {
         return List.copyOf(cities);
     }
 
+    /** Every seeded show. Used to eagerly warm the seat actors at startup. */
+    public List<Show> allShows() {
+        return List.copyOf(shows.values());
+    }
+
     public Optional<Movie> movie(String movieId) {
         return Optional.ofNullable(movies.get(movieId));
     }
