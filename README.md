@@ -82,6 +82,85 @@ renders a side-by-side report — see
   journal keeps mailboxes shallow, so backpressure stays dormant); the bounded
   mailbox is a memory safety-net for genuine single-actor overload.
 
+---
+
+## Supervision & crash recovery
+
+Persistence isn't only about surviving a clean restart — it's what lets a show
+survive a **crash**. Cinetor makes that concrete with a supervision layer and a
+fault you can inject on demand.
+
+Every seat actor is spawned as a **child of a `TheatreActor`** — one supervisor
+per theatre — with a `RESTART` supervision strategy. The theatre is the
+fault-isolation boundary: if one show's actor throws, the framework restarts
+**just that show**, and its siblings (and the theatre) carry on untouched. In a
+stateful mode that restart is a **recovery** — the actor replays its journal and
+rebuilds every hold and booking it had before it died.
+
+```
+TheatreActor  (supervisor, RESTART strategy)
+   ├── ShowActor / StatefulShowActor   ← panics mid-hold
+   ├── ShowActor / StatefulShowActor   ← unaffected
+   └── ShowActor / StatefulShowActor   ← unaffected
+        crash ─▶ restart ─▶ replay journal ─▶ held seats are back
+```
+
+### Inject a crash
+
+`POST /api/shows/{showId}/_panic` arms a one-shot fault: the show's **next hold
+panics mid-flight**, after the hold command has been journaled but before it is
+applied in memory. The supervising theatre restarts the show, and — in a stateful
+mode — recovery replays the journal so the seats that were already held survive
+the crash.
+
+> ⚠️ This endpoint **destroys reservations** (crashing a show drops its in-flight
+> holds, and in `memory` mode every hold and booking it had). It is therefore
+> **disabled by default** and only registered when chaos is explicitly enabled —
+> otherwise it 404s. Turn it on **only** for a local demo or in tests, never on a
+> reachable deployment:
+>
+> ```bash
+> cd backend
+> ACTOR_MODE=stateful CHAOS_ENABLED=true ./gradlew run   # or add -Pchaos=true
+> ```
+>
+> `GET /api/config` reports whether it is on (`"chaosEnabled": true`).
+
+Try it against a chaos-enabled `stateful` backend:
+
+```bash
+SHOW=blr-interstellar-prestige-blr-1030
+# 1. Hold A1/A2 — a real reservation, journaled to disk.
+curl -sX POST localhost:7070/api/shows/$SHOW/hold \
+  -H 'content-type: application/json' -d '{"seatIds":["A1","A2"],"holderId":"ada"}'
+# 2. Arm the fault.
+curl -sX POST localhost:7070/api/shows/$SHOW/_panic
+# 3. The next hold crashes the show actor (HTTP 500) — and restarts it.
+curl -sX POST localhost:7070/api/shows/$SHOW/hold \
+  -H 'content-type: application/json' -d '{"seatIds":["B1"],"holderId":"bob"}'
+# 4. After recovery, A1 is still blocked (409) and Ada's hold still confirms:
+#    the reservation survived the crash, rebuilt from the journal.
+curl -sX POST localhost:7070/api/shows/$SHOW/confirm \
+  -H 'content-type: application/json' -d '{"holdId":"<hold-from-step-1>","holderId":"ada"}'
+```
+
+In `memory` mode the same `_panic` still restarts the show, but there is no
+journal to replay, so the show comes back **empty** — the held seats are gone.
+That is the difference the persistence modes buy you: not just lower restart-time
+latency, but a booking that outlives the process that was serving it.
+
+### How the fault stays recoverable
+
+The trick is that the fault is injected **out of band** — a transient latch on the
+handler, never a message on the mailbox. A "please panic" *command* would be
+journaled and then replayed on recovery, crashing the actor again forever; a latch
+on the handler instance is cleared in `preStart` on restart, so the replay that
+rebuilds the seats never re-triggers it. The end-to-end story is exercised by
+[`SupervisedRecoveryTest`](backend/src/test/java/io/cinetor/actor/SupervisedRecoveryTest.java)
+(a real supervised restart recovering held seats) and
+[`ShowActorPanicTest`](backend/src/test/java/io/cinetor/actor/ShowActorPanicTest.java)
+(the in-memory actor losing them).
+
 ## Tech stack
 
 | Layer     | Tech                                                             |
@@ -99,7 +178,7 @@ cinetor/
 ├── backend/                      # Javalin + Cajun API (Gradle)
 │   └── src/main/java/io/cinetor/
 │       ├── CinetorApp.java       # HTTP routes, SSE endpoint, wiring
-│       ├── actor/                # ShowActor + message protocol
+│       ├── actor/                # ShowActor + message protocol + TheatreActor supervision
 │       ├── booking/              # BookingService (HTTP <-> actors, ask pattern)
 │       ├── catalog/              # In-memory demo catalogue
 │       ├── model/                # City/Movie/Theatre/Show + seat layout
@@ -173,6 +252,7 @@ separate "user"):
 | POST   | `/api/shows/{showId}/hold`                       | **Phase 1** — hold seats → hold or 409  |
 | POST   | `/api/shows/{showId}/confirm`                    | **Phase 2** — confirm hold → booking    |
 | POST   | `/api/shows/{showId}/release`                    | Release a hold early (cancel)           |
+| POST   | `/api/shows/{showId}/_panic`                     | Chaos hook — arm a crash on the next hold; **opt-in** ([supervision demo](#supervision--crash-recovery)) |
 | GET    | `/api/shows/{showId}/stream`                     | SSE stream of `seats-update` events     |
 | GET    | `/api/health`                                    | Liveness probe (`{"status":"ok"}`)      |
 | GET    | `/api/metrics`                                   | Prometheus metrics (Micrometer)         |
@@ -258,6 +338,7 @@ seats, never held ones.
 | **A seat you selected gets booked mid-selection** | The SSE update drops it from your selection and shows a notice, so you can't try to pay for a taken seat. | `SeatMap` seats-update handler |
 | **SSE update arrives before the initial REST load** | The live update wins; a late REST snapshot can't overwrite newer booked state (guarded by a `liveSeen` ref). | `SeatMap` |
 | **Backend restart** | In `memory` mode, state is in-memory so every show starts fresh; in the `stateful` modes, holds and bookings are replayed from the journal and survive the restart. | `ShowActor` / `StatefulShowActor` |
+| **A show actor crashes mid-hold** | The supervising `TheatreActor` restarts just that show (its siblings are untouched); in a `stateful` mode the restart replays the journal, so seats held before the crash survive. In `memory` mode the show restarts empty. | [Supervision & crash recovery](#supervision--crash-recovery) (`TheatreActor`, `FaultInjectable`) |
 
 ### The one deliberate trade-off
 

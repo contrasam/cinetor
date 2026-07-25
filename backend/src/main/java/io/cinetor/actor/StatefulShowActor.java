@@ -38,7 +38,7 @@ import java.util.UUID;
  * state — the actor is reconstructed with the same constructor arguments on
  * recovery, so they never need journaling.
  */
-public class StatefulShowActor implements StatefulHandler<ShowState, ShowProtocol.Command> {
+public class StatefulShowActor implements StatefulHandler<ShowState, ShowProtocol.Command>, FaultInjectable {
 
     private final Set<String> validSeatIds;
     private final long holdMillis;
@@ -49,9 +49,37 @@ public class StatefulShowActor implements StatefulHandler<ShowState, ShowProtoco
     // recovery path. See TimerKeeper.
     private final TimerKeeper<String> holdTimers = new TimerKeeper<>();
 
+    // Fault injection (see FaultInjectable). Transient and NOT part of ShowState,
+    // so it is never journaled: a supervised restart replays only the real booking
+    // commands, and the seat state comes back intact.
+    //
+    // The latch stays armed until the actor restarts (it is cleared in preStart,
+    // below), deliberately NOT clearing itself when it fires. That is what makes the
+    // failure reach the supervisor: the stateful actor retries a throwing
+    // processMessage a few times, and a self-clearing latch would simply succeed on
+    // the retry — the panic would be swallowed and no restart would happen. Kept
+    // armed, every attempt throws, the retries are exhausted, and the show's RESTART
+    // supervision (configured by its TheatreActor) kicks in.
+    private volatile boolean panicArmed = false;
+
     public StatefulShowActor(int rows, int cols, long holdMillis) {
         this.validSeatIds = Seats.validIds(rows, cols);
         this.holdMillis = holdMillis;
+    }
+
+    @Override
+    public void armPanic() {
+        this.panicArmed = true;
+    }
+
+    @Override
+    public ShowState preStart(ShowState state, ActorContext context) {
+        // Runs on every (re)start, before journal replay. Clearing the fault here is
+        // what lets the supervised restart replay the journal and rebuild the held
+        // seats instead of panicking again on the same hold. On a normal first start
+        // the latch is already clear, so this is a no-op.
+        panicArmed = false;
+        return state;
     }
 
     @Override
@@ -114,6 +142,19 @@ public class StatefulShowActor implements StatefulHandler<ShowState, ShowProtoco
             reply(context, new ShowProtocol.Rejected(
                     "Some seats are no longer available", List.copyOf(conflicts)));
             return state;
+        }
+
+        // Injected fault: panic in the middle of processing a hold. Any holds this
+        // show had already confirmed as held are safe on disk (each Hold command is
+        // journaled before the handler runs), so when the show's RESTART supervision
+        // restarts this actor, recovery replays the journal and those reservations
+        // come back — the whole point of the demonstration. The latch is cleared in
+        // preStart on that restart, not here, so it stays armed across the stateful
+        // actor's processMessage retries and the failure actually reaches the
+        // supervisor instead of being retried away.
+        if (panicArmed) {
+            throw new IllegalStateException(
+                    "Injected fault: StatefulShowActor panicked mid-hold for " + hold.holdId());
         }
 
         // Id and expiry are derived from the command (assigned by BookingService),
