@@ -51,7 +51,8 @@ tasks.named('test') {
 }
 
 // Convenience: -Pport=xxxx sets the HTTP port, -PholdSeconds=N the hold window,
-// -PactorMode=memory|stateful|stateful-backpressure the seat-actor flavour.
+// -PactorMode=memory|stateful|stateful-backpressure the seat-actor flavour,
+// -Pchaos=true exposes the crash-injection endpoint (off by default).
 tasks.named('run') {
     if (project.hasProperty('port')) {
         systemProperty 'cinetor.port', project.property('port')
@@ -61,5 +62,9 @@ tasks.named('run') {
     }
     if (project.hasProperty('actorMode')) {
         systemProperty 'cinetor.actorMode', project.property('actorMode')
+    }
+    // Opt-in crash-injection endpoint (POST /_panic); off unless -Pchaos is set.
+    if (project.hasProperty('chaos')) {
+        systemProperty 'cinetor.chaos', project.property('chaos')
     }
 }

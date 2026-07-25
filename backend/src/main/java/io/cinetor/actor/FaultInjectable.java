@@ -16,11 +16,20 @@ package io.cinetor.actor;
 public interface FaultInjectable {
 
     /**
-     * Arm a one-shot panic: the <em>next</em> hold this actor processes throws
-     * mid-flight, after the hold command has been journaled but before it is
-     * applied in memory. The latch clears itself as it fires, so the restart that
-     * follows (driven by the supervising {@link TheatreActor}) replays the
-     * journaled hold without re-triggering the fault.
+     * Arm a panic: the <em>next</em> hold this actor processes throws mid-flight,
+     * after the hold command has been journaled but before it is applied in memory.
+     *
+     * <p>The latch deliberately does <b>not</b> clear itself when it fires — it
+     * stays armed until the actor restarts, at which point {@code preStart} clears
+     * it. That lifecycle is essential, not incidental: the stateful actor retries a
+     * throwing {@code processMessage} a few times, and a self-clearing latch would
+     * simply succeed on the retry, so the fault would be swallowed and no restart
+     * would happen. Kept armed, every attempt throws, the retries are exhausted, and
+     * the show's {@code RESTART} supervision (configured by its {@link TheatreActor})
+     * kicks in. {@code preStart} then clears the latch on the way back up — before
+     * journal replay — so recovery rebuilds the seats without re-triggering the
+     * fault. A future implementation must preserve this "armed until preStart"
+     * behaviour rather than clearing on fire.
      */
     void armPanic();
 }

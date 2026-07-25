@@ -43,6 +43,10 @@ public final class CinetorApp {
         int port = resolvePort();
         long holdMillis = resolveHoldMillis();
         ActorMode mode = resolveActorMode();
+        // The crash-injection endpoint is a demo/test hook that can destroy live
+        // reservations, so it is OFF unless explicitly enabled. Never enable it on a
+        // reachable deployment.
+        boolean chaosEnabled = resolveChaosEnabled();
 
         // A backpressure-aware system needs a system-level monitor, which only
         // exists when the system is built with a BackpressureConfig. The other
@@ -109,7 +113,8 @@ public final class CinetorApp {
         app.get("/api/config", ctx ->
                 ctx.json(Map.of(
                         "holdSeconds", (int) (holdMillis / 1000),
-                        "actorMode", mode.label())));
+                        "actorMode", mode.label(),
+                        "chaosEnabled", chaosEnabled)));
 
         app.get("/api/cities", ctx -> ctx.json(catalogue.cities()));
 
@@ -215,20 +220,27 @@ public final class CinetorApp {
         // modes — recovery replays the journal so already-held/booked seats survive.
         // This is what turns the persistence modes into a crash-recovery story; see
         // the README's "Supervision & crash recovery" section.
-
-        app.post("/api/shows/{showId}/_panic", ctx -> {
-            Show show = requireShow(catalogue, ctx);
-            if (show == null) {
-                return;
-            }
-            boolean armed = bookings.armPanic(show);
-            ctx.json(Map.of(
-                    "armed", armed,
-                    "actorMode", mode.label(),
-                    "note", mode.isStateful()
-                            ? "Next hold will crash this show; the theatre restarts it and it recovers held seats from the journal."
-                            : "Next hold will crash this show; it restarts empty (memory mode has no journal to recover from)."));
-        });
+        //
+        // DANGEROUS: crashing a show also drops in-flight holds (and, in memory mode,
+        // every hold and booking it had). It is a deliberate fault-injection hook, so
+        // the route only exists when chaos is explicitly enabled — otherwise any
+        // client could destroy live reservations. When disabled it is simply not
+        // registered, so it 404s like any unknown path.
+        if (chaosEnabled) {
+            app.post("/api/shows/{showId}/_panic", ctx -> {
+                Show show = requireShow(catalogue, ctx);
+                if (show == null) {
+                    return;
+                }
+                boolean armed = bookings.armPanic(show);
+                ctx.json(Map.of(
+                        "armed", armed,
+                        "actorMode", mode.label(),
+                        "note", mode.isStateful()
+                                ? "Next hold will crash this show; the theatre restarts it and it recovers held seats from the journal."
+                                : "Next hold will crash this show; it restarts empty (memory mode has no journal to recover from)."));
+            });
+        }
 
         // --- Release a hold (user cancelled) -----------------------------------
 
@@ -295,6 +307,10 @@ public final class CinetorApp {
 
         app.start(port);
         log.info("Cinetor backend listening on http://localhost:{} (actor mode: {})", port, mode.label());
+        if (chaosEnabled) {
+            log.warn("CHAOS ENABLED: POST /api/shows/{{id}}/_panic can crash shows and destroy "
+                    + "reservations. This is for demos/tests only — do not expose it on a real deployment.");
+        }
     }
 
     /**
@@ -411,5 +427,19 @@ public final class CinetorApp {
         } catch (NumberFormatException e) {
             return 300_000L;
         }
+    }
+
+    /**
+     * Whether the crash-injection endpoint ({@code POST /api/shows/{id}/_panic}) is
+     * exposed. Defaults to {@code false}: it can destroy live reservations, so it is
+     * only for controlled demo/test environments. Enable with {@code -Dcinetor.chaos=true}
+     * (or the {@code CHAOS_ENABLED} env var) — never on a reachable deployment.
+     */
+    private static boolean resolveChaosEnabled() {
+        String prop = System.getProperty("cinetor.chaos");
+        if (prop == null) {
+            prop = System.getenv("CHAOS_ENABLED");
+        }
+        return "true".equalsIgnoreCase(prop) || "1".equals(prop);
     }
 }

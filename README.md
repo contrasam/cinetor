@@ -111,7 +111,22 @@ TheatreActor  (supervisor, RESTART strategy)
 panics mid-flight**, after the hold command has been journaled but before it is
 applied in memory. The supervising theatre restarts the show, and — in a stateful
 mode — recovery replays the journal so the seats that were already held survive
-the crash. Try it against a `stateful` backend:
+the crash.
+
+> ⚠️ This endpoint **destroys reservations** (crashing a show drops its in-flight
+> holds, and in `memory` mode every hold and booking it had). It is therefore
+> **disabled by default** and only registered when chaos is explicitly enabled —
+> otherwise it 404s. Turn it on **only** for a local demo or in tests, never on a
+> reachable deployment:
+>
+> ```bash
+> cd backend
+> ACTOR_MODE=stateful CHAOS_ENABLED=true ./gradlew run   # or add -Pchaos=true
+> ```
+>
+> `GET /api/config` reports whether it is on (`"chaosEnabled": true`).
+
+Try it against a chaos-enabled `stateful` backend:
 
 ```bash
 SHOW=blr-interstellar-prestige-blr-1030
@@ -237,7 +252,7 @@ separate "user"):
 | POST   | `/api/shows/{showId}/hold`                       | **Phase 1** — hold seats → hold or 409  |
 | POST   | `/api/shows/{showId}/confirm`                    | **Phase 2** — confirm hold → booking    |
 | POST   | `/api/shows/{showId}/release`                    | Release a hold early (cancel)           |
-| POST   | `/api/shows/{showId}/_panic`                     | Chaos hook — arm a crash on the next hold ([supervision demo](#supervision--crash-recovery)) |
+| POST   | `/api/shows/{showId}/_panic`                     | Chaos hook — arm a crash on the next hold; **opt-in** ([supervision demo](#supervision--crash-recovery)) |
 | GET    | `/api/shows/{showId}/stream`                     | SSE stream of `seats-update` events     |
 | GET    | `/api/health`                                    | Liveness probe (`{"status":"ok"}`)      |
 | GET    | `/api/metrics`                                   | Prometheus metrics (Micrometer)         |
